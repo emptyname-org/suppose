@@ -158,9 +158,10 @@ def agent_runs(pid):
         return False
 
 
-OPEN_PANES = set()  # panes of windows not closed yet
-STARTING = set()  # panes with an agent start under way
-ENDING = {}  # agents hung up by closed windows: pid -> time.monotonic() to kill
+OPEN_PANES: set["BookPanes"] = set()  # of windows not closed yet
+STARTING: set["BookPanes"] = set()  # with an agent start under way
+# agents hung up by closed windows: pid -> time.monotonic() to kill
+ENDING: dict[int, float] = {}
 
 
 def end_agent(pid):
