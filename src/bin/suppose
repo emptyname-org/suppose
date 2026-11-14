@@ -1,19 +1,19 @@
 #!/bin/sh
 # Apostrophe with book panes: folder tree (left), agent terminal (right).
-# Usage: book-editor [FOLDER | FILE...]
+# Usage: suppose [FOLDER | FILE...]
 # The working folder is FOLDER, or the folder of FILE, or BOOK_ROOT, or the
 # one used last, or the one chosen in a dialog.
-# BOOK_EDITOR_MAIN replaces the program run in this environment (tests).
+# SUPPOSE_MAIN replaces the program run in this environment (tests).
 here=$(dirname "$(readlink -f "$0")")
 root=$(dirname "$here")
 usr=$root/usr
 for lib in "$usr"/lib/*-linux-gnu*; do break; done
 if [ ! -d "$lib" ]; then
-    echo "book-editor: no Apostrophe in $usr; run make build" >&2
+    echo "suppose: no Apostrophe in $usr; run make build" >&2
     exit 1
 fi
 # this machine's settings, NAME=value lines: BOOK_CLAUDE, CLAUDE_CONFIG_DIR, ...
-settings=${XDG_CONFIG_HOME:-$HOME/.config}/book-editor/environment
+settings=${XDG_CONFIG_HOME:-$HOME/.config}/suppose/environment
 if [ -r "$settings" ]; then
     set -a
     # shellcheck source=/dev/null
@@ -35,7 +35,7 @@ elif [ -n "${1:-}" ] && [ -e "$1" ]; then
 elif [ -n "${BOOK_ROOT:-}" ]; then
     folder=$BOOK_ROOT
 else
-    last=${XDG_STATE_HOME:-$HOME/.local/state}/book-editor/last-folder
+    last=${XDG_STATE_HOME:-$HOME/.local/state}/suppose/last-folder
     if [ -r "$last" ]; then
         IFS= read -r folder <"$last" || true
     fi
@@ -45,4 +45,4 @@ else
 fi
 BOOK_ROOT=$(cd -- "$folder" && pwd) || exit 1
 export BOOK_ROOT
-exec /usr/bin/python3 "${BOOK_EDITOR_MAIN:-$usr/bin/apostrophe}" "$@"
+exec /usr/bin/python3 "${SUPPOSE_MAIN:-$usr/bin/apostrophe}" "$@"

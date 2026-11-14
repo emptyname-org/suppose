@@ -17,8 +17,8 @@ import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib
 
-SOCKET_ENV = "BOOK_EDITOR_SOCKET"
-DIR_PREFIX = "book-editor-"
+SOCKET_ENV = "SUPPOSE_SOCKET"
+DIR_PREFIX = "suppose-"
 SOCKET_NAME = "socket"
 MAX_SOCKET_PATH_BYTES = 107  # sun_path without its final NUL
 MAX_REQUEST_BYTES = 16 * 1024 * 1024

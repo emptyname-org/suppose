@@ -602,7 +602,7 @@ def scenario(app):
     )
 
     # the agent engines, in place of a command of the user's own
-    kept = os.path.join(BOOK, ".book-editor")
+    kept = os.path.join(BOOK, ".suppose")
     check(
         "engine: none chosen yet, claude is the one",
         book.engine == "claude" and not os.path.exists(kept),
@@ -628,8 +628,8 @@ def scenario(app):
     text = " ".join(terminal_text(book).split())
     check(
         "engine: codex takes over, the editor's tools with it",
-        "engine=codex args=-c mcp_servers.book_editor.command=" in text
-        and "BOOK_EDITOR_SOCKET=" in text
+        "engine=codex args=-c mcp_servers.suppose.command=" in text
+        and "SUPPOSE_SOCKET=" in text
         and book.running_engine == "codex",
     )
     check(
@@ -669,11 +669,11 @@ def scenario(app):
     fake = os.path.join(SCRATCH, "fake-bin")
     os.makedirs(fake)
     write(
-        os.path.join(fake, "book-editor"),
+        os.path.join(fake, "suppose"),
         "#!/bin/sh\n"
-        'echo "$1|${BOOK_ROOT:-}|${BOOK_EDITOR_SOCKET:-}|${PYTHONPATH:-}" >"$OUT"\n',
+        'echo "$1|${BOOK_ROOT:-}|${SUPPOSE_SOCKET:-}|${PYTHONPATH:-}" >"$OUT"\n',
     )
-    os.chmod(os.path.join(fake, "book-editor"), 0o755)
+    os.chmod(os.path.join(fake, "suppose"), 0o755)
     tools, panes.TOOLS_DIR = panes.TOOLS_DIR, fake
     os.environ["OUT"] = os.path.join(SCRATCH, "launched")
     panes.launch_editor(os.path.join(BOOK, "part"))

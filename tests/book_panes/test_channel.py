@@ -258,13 +258,13 @@ class LifecycleTest(ChannelCase):
             client.ask({}, opened.path)
 
     def test_folders_of_dead_editors_are_removed_at_start(self):
-        dead = os.path.join(self.base, "book-editor-2147483646-abc")
+        dead = os.path.join(self.base, "suppose-2147483646-abc")
         os.mkdir(dead)
         with socket.socket(socket.AF_UNIX) as leftover:
             leftover.bind(os.path.join(dead, "socket"))
-        alive = os.path.join(self.base, f"book-editor-{os.getppid()}-abc")
+        alive = os.path.join(self.base, f"suppose-{os.getppid()}-abc")
         os.mkdir(alive)
-        strange = os.path.join(self.base, "book-editor-2147483645-abc")
+        strange = os.path.join(self.base, "suppose-2147483645-abc")
         os.mkdir(strange)
         with open(os.path.join(strange, "notes"), "w") as target:
             target.write("not ours to delete")

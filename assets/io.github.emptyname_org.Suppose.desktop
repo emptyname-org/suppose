@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Book Editor
+Name=Suppose
 Comment=Write a book with an AI agent beside the text
-Exec=book-editor %f
-Icon=io.github.emptyname_org.BookEditor
+Exec=suppose %f
+Icon=io.github.emptyname_org.Suppose
 Terminal=false
 Categories=Office;TextEditor;
 MimeType=inode/directory;text/markdown;
-StartupWMClass=io.github.emptyname_org.BookEditor
+StartupWMClass=io.github.emptyname_org.Suppose
 StartupNotify=true

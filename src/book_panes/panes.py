@@ -93,7 +93,7 @@ LAUNCHER_PATH_VARS = (
 
 def state_file(name):
     home = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    return os.path.join(home, "book-editor", name)
+    return os.path.join(home, "suppose", name)
 
 
 def remember_folder(path):
@@ -116,7 +116,7 @@ def launch_editor(folder):
     environ = {name: value for name, value in os.environ.items() if name not in dropped}
     environ.update(changed)
     GLib.spawn_async(
-        [os.path.join(TOOLS_DIR, "book-editor"), folder],
+        [os.path.join(TOOLS_DIR, "suppose"), folder],
         envp=[f"{name}={value}" for name, value in environ.items()],
         flags=GLib.SpawnFlags.DEFAULT,
     )

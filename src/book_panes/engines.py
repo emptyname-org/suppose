@@ -1,15 +1,15 @@
 """The agent engines of the terminal pane and their conversations.
 
-A working folder keeps its conversations in its `.book-editor` folder, one
+A working folder keeps its conversations in its `.suppose` folder, one
 for each engine, transcripts included: moved or copied, the folder goes on
 where it stopped.
 
-    .book-editor/engine            the engine chosen
-    .book-editor/claude/session    id of the conversation
-    .book-editor/claude/ID.jsonl   its transcript; Claude Code resumes by path
-    .book-editor/claude/ID/        copy of what Claude Code keeps beside it
-    .book-editor/codex/session
-    .book-editor/codex/rollout-…-ID.jsonl
+    .suppose/engine            the engine chosen
+    .suppose/claude/session    id of the conversation
+    .suppose/claude/ID.jsonl   its transcript; Claude Code resumes by path
+    .suppose/claude/ID/        copy of what Claude Code keeps beside it
+    .suppose/codex/session
+    .suppose/codex/rollout-…-ID.jsonl
                                    Codex resumes by id; its home holds a link
 
 The conversation is the one the engine had open last: /clear, /new and
@@ -43,12 +43,12 @@ import subprocess
 import sys
 import uuid
 
-STATE_DIR = ".book-editor"
+STATE_DIR = ".suppose"
 ENGINE_ENV = "BOOK_ENGINE"
 ENGINES = {"claude": "Claude Code", "codex": "Codex"}  # name: label, menu order
 DEFAULT_ENGINE = "claude"
 COMMAND_ENV = {"claude": "BOOK_CLAUDE", "codex": "BOOK_CODEX"}
-SOCKET_ENV = "BOOK_EDITOR_SOCKET"
+SOCKET_ENV = "SUPPOSE_SOCKET"
 TOOLS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"
 )
@@ -81,7 +81,7 @@ def read_word(path):
 
 
 def record_folder(folder, *parts):
-    """The folder's .book-editor, or a folder under it, made when missing.
+    """The folder's .suppose, or a folder under it, made when missing.
     It never appears without its .gitignore: conversations are not for a
     repository the folder may be. One the user removed stays removed."""
     top = os.path.join(folder, STATE_DIR)
@@ -103,7 +103,7 @@ def record_folder(folder, *parts):
 
 
 def write_word(folder, name, word):
-    """Record a word under the folder's .book-editor, whole or not at all."""
+    """Record a word under the folder's .suppose, whole or not at all."""
     directory = record_folder(folder, os.path.dirname(name))
     path = os.path.join(directory, os.path.basename(name))
     partial = f"{path}.{os.getpid()}"
@@ -211,7 +211,7 @@ def hold(*parts):
     """A lock under the claims for this process: a locked descriptor to
     keep open, gone with the process. None when another process has it, or
     no lock can be kept."""
-    path = os.path.join(state_home(), "book-editor", "claims", *parts)
+    path = os.path.join(state_home(), "suppose", "claims", *parts)
     try:
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
         guard = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
@@ -229,7 +229,7 @@ def claim_file(folder, engine, name):
     """A file of the agent that has the folder's conversation with the
     engine; this machine's, not the folder's."""
     return os.path.join(
-        state_home(), "book-editor", "claims", folder_key(folder), engine, name
+        state_home(), "suppose", "claims", folder_key(folder), engine, name
     )
 
 
@@ -274,7 +274,8 @@ def claude_transcript(folder, session):
 
 
 def earlier_session(folder):
-    """The conversation an earlier version kept outside the folder."""
+    """The conversation an earlier version kept outside the folder, under
+    the name the application had then."""
     path = os.path.join(
         state_home(), "book-editor", "sessions", folder_key(folder), "session"
     )
@@ -572,13 +573,9 @@ def codex_options():
     server = os.path.join(TOOLS_DIR, "book-mcp")
     return [
         "-c",
-        "mcp_servers.book_editor.command=" + toml_string(server),
+        "mcp_servers.suppose.command=" + toml_string(server),
         "-c",
-        "mcp_servers.book_editor.env={"
-        + SOCKET_ENV
-        + "="
-        + toml_string(socket_path)
-        + "}",
+        "mcp_servers.suppose.env={" + SOCKET_ENV + "=" + toml_string(socket_path) + "}",
     ]
 
 

@@ -1,6 +1,6 @@
 """Book panes for Apostrophe: folder tree, agent terminal, editor channel."""
 
-APP_ID = "io.github.emptyname_org.BookEditor"  # of windows, desktop entry, icon
+APP_ID = "io.github.emptyname_org.Suppose"  # of windows, desktop entry, icon
 
 
 def install(window):

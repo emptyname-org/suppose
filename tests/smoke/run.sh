@@ -1,9 +1,9 @@
 #!/bin/sh
 # Runs smoke.py inside the built editor on a hidden X display, with
-# throwaway settings. BOOK_EDITOR_DIST: the build to test (default: dist).
+# throwaway settings. SUPPOSE_DIST: the build to test (default: dist).
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
-app=${BOOK_EDITOR_DIST:-$root/dist/book-editor}
+app=${SUPPOSE_DIST:-$root/dist/suppose}
 mkdir -p "$root/tmp/smoke"
 scratch=$(mktemp -d "$root/tmp/smoke/run.XXXXXX")
 mkdir -m 700 "$scratch/home" "$scratch/runtime" "$scratch/book"
@@ -21,7 +21,7 @@ exec cat
 END
 chmod +x "$scratch/engine"
 exec env -u WAYLAND_DISPLAY -u BOOK_ENGINE -u PYTHONPATH -u LD_LIBRARY_PATH -u GI_TYPELIB_PATH \
-    -u GSETTINGS_SCHEMA_DIR -u XDG_DATA_DIRS -u BOOK_EDITOR_SOCKET \
+    -u GSETTINGS_SCHEMA_DIR -u XDG_DATA_DIRS -u SUPPOSE_SOCKET \
     GDK_BACKEND=x11 GSK_RENDERER=cairo GSETTINGS_BACKEND=memory \
     HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/home/.config" \
     XDG_DATA_HOME="$scratch/home/.local/share" \
@@ -31,7 +31,7 @@ exec env -u WAYLAND_DISPLAY -u BOOK_ENGINE -u PYTHONPATH -u LD_LIBRARY_PATH -u G
     BOOK_CLAUDE="$scratch/engine" BOOK_CODEX="$scratch/engine" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$scratch/runtime}" \
     SMOKE_SCRATCH="$scratch" BOOK_ROOT="$scratch/book" BOOK_AGENT_CMD="$agent" \
-    BOOK_EDITOR_MAIN="$root/tests/smoke/smoke.py" \
+    SUPPOSE_MAIN="$root/tests/smoke/smoke.py" \
     dbus-run-session -- \
     xvfb-run -a -s "-screen 0 1680x1000x24" \
-    "$app/bin/book-editor"
+    "$app/bin/suppose"

@@ -136,7 +136,7 @@ def answer(message):
         result = {
             "protocolVersion": wanted if isinstance(wanted, str) else PROTOCOL,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "book-editor", "version": "1"},
+            "serverInfo": {"name": "suppose", "version": "1"},
             "instructions": INSTRUCTIONS,
         }
     elif method == "ping":

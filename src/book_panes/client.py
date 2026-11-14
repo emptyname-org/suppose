@@ -10,7 +10,7 @@ import socket
 import sys
 import time
 
-SOCKET_ENV = "BOOK_EDITOR_SOCKET"
+SOCKET_ENV = "SUPPOSE_SOCKET"
 TIMEOUT_SECONDS = 15.0  # whole exchange; the editor's own deadline is shorter
 MAX_REPLY_BYTES = 64 * 1024 * 1024
 REFUSED = 1

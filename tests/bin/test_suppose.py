@@ -1,4 +1,4 @@
-"""book-editor: which folder the editor is started on."""
+"""suppose: which folder the editor is started on."""
 
 import json
 import os
@@ -10,7 +10,7 @@ import unittest
 ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 )
-LAUNCHER = os.path.join(ROOT, "src", "bin", "book-editor")
+LAUNCHER = os.path.join(ROOT, "src", "bin", "suppose")
 MAIN = """import json, os, sys
 names = ("BOOK_ROOT", "BOOK_CLAUDE", "PYTHONPATH")
 print(json.dumps({"cwd": os.getcwd(), "args": sys.argv[1:],
@@ -34,7 +34,7 @@ class LauncherTest(unittest.TestCase):
         os.makedirs(os.path.join(self.app, "bin"))
         os.makedirs(os.path.join(self.app, "usr", "lib", "x86_64-linux-gnu"))
         os.makedirs(os.path.join(self.app, "book_panes"))
-        shutil.copy(LAUNCHER, os.path.join(self.app, "bin", "book-editor"))
+        shutil.copy(LAUNCHER, os.path.join(self.app, "bin", "suppose"))
         self.write(os.path.join(self.app, "book_panes", "__init__.py"), "")
         self.write(os.path.join(self.app, "book_panes", "choose.py"), CHOOSE)
         self.main = os.path.join(self.scratch, "main.py")
@@ -45,7 +45,7 @@ class LauncherTest(unittest.TestCase):
         for folder in (self.book, self.other, self.start):
             os.makedirs(folder)
         self.write(os.path.join(self.book, "one.md"), "# One\n")
-        self.command = os.path.join(self.app, "bin", "book-editor")
+        self.command = os.path.join(self.app, "bin", "suppose")
 
     def write(self, path, text):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -60,7 +60,7 @@ class LauncherTest(unittest.TestCase):
             "HOME": os.path.join(self.scratch, "home"),
             "XDG_STATE_HOME": os.path.join(self.scratch, "state"),
             "XDG_CONFIG_HOME": os.path.join(self.scratch, "config"),
-            "BOOK_EDITOR_MAIN": self.main,
+            "SUPPOSE_MAIN": self.main,
         }
         environ.update(changes)
         done = subprocess.run(
@@ -76,7 +76,7 @@ class LauncherTest(unittest.TestCase):
         return json.loads(done.stdout) if done.stdout.strip() else None
 
     def remember(self, folder):
-        last = os.path.join(self.scratch, "state", "book-editor", "last-folder")
+        last = os.path.join(self.scratch, "state", "suppose", "last-folder")
         self.write(last, folder + "\n")
 
     def test_a_folder_named_is_the_working_folder(self):
@@ -126,7 +126,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(self.status, 0)
 
     def test_the_machines_settings_reach_the_editor(self):
-        settings = os.path.join(self.scratch, "config", "book-editor", "environment")
+        settings = os.path.join(self.scratch, "config", "suppose", "environment")
         self.write(settings, "# engines\nBOOK_CLAUDE=/opt/claude/bin/claude\n")
         started = self.launch(self.book)
         self.assertEqual(started["BOOK_CLAUDE"], "/opt/claude/bin/claude")
@@ -136,8 +136,8 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(started["PYTHONPATH"].split(os.pathsep)[0], self.app)
 
     def test_a_link_to_the_launcher_finds_the_install(self):
-        self.command = os.path.join(self.scratch, "book-editor")
-        os.symlink(os.path.join(self.app, "bin", "book-editor"), self.command)
+        self.command = os.path.join(self.scratch, "suppose")
+        os.symlink(os.path.join(self.app, "bin", "suppose"), self.command)
         started = self.launch(self.book)
         self.assertEqual(started["PYTHONPATH"].split(os.pathsep)[0], self.app)
 

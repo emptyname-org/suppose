@@ -90,7 +90,7 @@ else
     rollout "$FAKE_ID"
 fi
 sleep "${FAKE_SLEEP:-0.5}"
-if [ -f .book-editor/codex/session ]; then cp .book-editor/codex/session "$OUT.seen"; fi
+if [ -f .suppose/codex/session ]; then cp .suppose/codex/session "$OUT.seen"; fi
 exit "${FAKE_STATUS:-0}"
 """
 
@@ -119,7 +119,7 @@ class EngineCase(unittest.TestCase):
         self.addCleanup(environ.stop)
         for name in (
             "BOOK_ENGINE",
-            "BOOK_EDITOR_SOCKET",
+            "SUPPOSE_SOCKET",
             *(name for name in os.environ if name.startswith("FAKE_")),
         ):
             os.environ.pop(name, None)
@@ -148,7 +148,7 @@ class EngineCase(unittest.TestCase):
         return status, called
 
     def kept(self, *parts):
-        return os.path.join(os.getcwd(), ".book-editor", *parts)
+        return os.path.join(os.getcwd(), ".suppose", *parts)
 
     def another_filesystem(self):
         """Transcripts cannot be renamed into place, as across filesystems."""
@@ -221,7 +221,7 @@ class RecordTest(EngineCase):
         with mock.patch("os.rename", late):
             made = engines.record_folder(self.book, "codex")
         self.assertEqual(made, self.kept("codex"))
-        self.assertEqual(sorted(os.listdir(self.book)), [".book-editor"])
+        self.assertEqual(sorted(os.listdir(self.book)), [".suppose"])
 
     def test_a_folder_that_takes_no_record_says_so(self):
         os.chmod(self.book, 0o500)
@@ -358,7 +358,7 @@ class ClaudeTest(EngineCase):
             called,
             [
                 "--resume",
-                os.path.join(moved, ".book-editor/claude", session + ".jsonl"),
+                os.path.join(moved, ".suppose/claude", session + ".jsonl"),
             ],
         )
 
@@ -660,7 +660,7 @@ class CodexTest(EngineCase):
         os.chdir(moved)
         _status, called = self.start()
         self.assertEqual(called, ["resume", self.session])
-        kept = os.path.join(moved, ".book-editor/codex", self.name)
+        kept = os.path.join(moved, ".suppose/codex", self.name)
         self.assertEqual(os.readlink(self.link), kept)
         self.assertTrue(read(kept).endswith("more\n"))
 
@@ -722,7 +722,7 @@ class CodexTest(EngineCase):
         self.assertEqual(read(self.kept("codex", "session")), self.session + "\n")
         self.assertEqual(
             os.readlink(self.link),
-            os.path.join(self.book, ".book-editor/codex", self.name),
+            os.path.join(self.book, ".suppose/codex", self.name),
         )
 
     def test_a_copy_of_the_folder_goes_on_by_itself_once_that_agent_ended(self):
@@ -823,22 +823,22 @@ class CodexTest(EngineCase):
             self.assertIsNone(engines.current_codex(os.getpid()))
 
     def test_the_editors_tools_come_as_a_server_of_codex(self):
-        _status, called = self.start(BOOK_EDITOR_SOCKET='/run/a "b"/socket')
+        _status, called = self.start(SUPPOSE_SOCKET='/run/a "b"/socket')
         server = os.path.join(engines.TOOLS_DIR, "book-mcp")
         self.assertEqual(
             called,
             [
                 "-c",
-                f'mcp_servers.book_editor.command="{server}"',
+                f'mcp_servers.suppose.command="{server}"',
                 "-c",
-                'mcp_servers.book_editor.env={BOOK_EDITOR_SOCKET="/run/a \\"b\\"/socket"}',
+                'mcp_servers.suppose.env={SUPPOSE_SOCKET="/run/a \\"b\\"/socket"}',
             ],
         )
         self.assertTrue(os.access(server, os.X_OK))
 
     def test_resuming_keeps_the_tools_and_more_arguments(self):
         self.start()
-        _status, called = self.start("--search", BOOK_EDITOR_SOCKET="/run/socket")
+        _status, called = self.start("--search", SUPPOSE_SOCKET="/run/socket")
         self.assertEqual(called[0], "resume")
         self.assertEqual(called[-2:], [self.session, "--search"])
         self.assertEqual(len(called), 7)

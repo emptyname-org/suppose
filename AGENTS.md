@@ -1,6 +1,6 @@
-# book-editor guidance
+# suppose guidance
 
-- `make build` puts the application into `dist/book-editor`. `make test` runs
+- `make build` puts the application into `dist/suppose`. `make test` runs
   the unit tests and the built editor on a hidden display, with and without
   folder watching; statements and branches of `src/book_panes` are covered to
   at least 85 %. `make lint` runs ruff, mypy, shellcheck and the advisory check

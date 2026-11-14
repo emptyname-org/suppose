@@ -1,4 +1,4 @@
-# book-editor
+# Suppose
 
 [Apostrophe](https://gitlab.gnome.org/World/apostrophe) 3.2 with two more panes
 for writing a book with an AI agent: the book's folder tree on the left, the
@@ -12,14 +12,14 @@ agent's terminal on the right.
 - **Agent**: a terminal running Claude Code or Codex, chosen in the pane's
   header, in the working folder. Shift+Enter breaks a line, Ctrl+Shift+C and
   Ctrl+Shift+V copy and paste.
-- **Conversations**: the folder keeps one for each engine in `.book-editor/`,
+- **Conversations**: the folder keeps one for each engine in `.suppose/`,
   transcripts included, and goes on with it when opened again, also after it
   was moved or copied. `/clear`, `/new` and `/resume` in the engine change the
-  folder's conversation. `.book-editor/.gitignore` keeps them out of a
+  folder's conversation. `.suppose/.gitignore` keeps them out of a
   repository.
 - **Channel**: the agent reads and changes the text open in the editor, saved
   or not. Every change is one undo step in the editor. Codex has the same as
-  the tools `view` and `edit` of its MCP server `book_editor`.
+  the tools `view` and `edit` of its MCP server `suppose`.
 
       book-view                    the text
       book-view --status           file, saved state, cursor, selection
@@ -33,7 +33,7 @@ agent's terminal on the right.
 Debian 13 (Python 3.13), amd64. `make build` downloads Apostrophe and the libraries pinned in
 `packages.lock` from Debian, verifies their checksums, applies
 `patches/apostrophe-3.2-book.patch` and puts the application into
-`dist/book-editor`. Nothing is installed into the system.
+`dist/suppose`. Nothing is installed into the system.
 
 Needed on the host:
 
@@ -48,15 +48,15 @@ and for the tests:
 
 Commands:
 
-    make build    # dist/book-editor
-    make deb      # dist/book-editor_VERSION_amd64.deb
+    make build    # dist/suppose
+    make deb      # dist/suppose_VERSION_amd64.deb
     make install  # make deb, then installs the package with sudo
     make test     # unit tests, then the built editor on a hidden display, with
                   # and without folder watching; statements and branches of
                   # src/book_panes are covered to at least 85 %
     make lint     # ruff, mypy, shellcheck and an advisory check of the pinned
                   # packages (needs the network)
-    make clean    # removes dist/book-editor; tools and downloads stay
+    make clean    # removes dist/suppose; tools and downloads stay
 
 `make test` needs a checkout path of at most 51 bytes: the editor's socket
 lives below it during the tests, and a socket path is short.
@@ -66,18 +66,18 @@ lives below it during the tests, and a socket path is short.
     make install
 
 builds the package and installs it with `sudo apt-get install`, which asks for
-the password: the application in `/opt/book-editor`, the command
-`book-editor`, a menu entry and "Open with" for folders. Run again, it
-installs the new build. `sudo apt remove book-editor` removes it.
+the password: the application in `/opt/suppose`, the command
+`suppose`, a menu entry and "Open with" for folders. Run again, it
+installs the new build. `sudo apt remove suppose` removes it.
 
 ## Run
 
-    book-editor [FOLDER | FILE...]
+    suppose [FOLDER | FILE...]
 
 Without a folder the last one opens; the first time a dialog asks. A build
-runs in place as `dist/book-editor/bin/book-editor`.
+runs in place as `dist/suppose/bin/suppose`.
 
-`~/.config/book-editor/environment`, lines of `NAME=value`, sets variables
+`~/.config/suppose/environment`, lines of `NAME=value`, sets variables
 for a start from the menu:
 
 | Variable | Meaning | Default |
