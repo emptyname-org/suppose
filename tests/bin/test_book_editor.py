@@ -45,6 +45,7 @@ class LauncherTest(unittest.TestCase):
         for folder in (self.book, self.other, self.start):
             os.makedirs(folder)
         self.write(os.path.join(self.book, "one.md"), "# One\n")
+        self.command = os.path.join(self.app, "bin", "book-editor")
 
     def write(self, path, text):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -63,7 +64,7 @@ class LauncherTest(unittest.TestCase):
         }
         environ.update(changes)
         done = subprocess.run(
-            [os.path.join(self.app, "bin", "book-editor"), *arguments],
+            [self.command, *arguments],
             cwd=self.start,
             env=environ,
             capture_output=True,
@@ -131,6 +132,12 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(started["BOOK_CLAUDE"], "/opt/claude/bin/claude")
 
     def test_the_editor_finds_its_own_modules(self):
+        started = self.launch(self.book)
+        self.assertEqual(started["PYTHONPATH"].split(os.pathsep)[0], self.app)
+
+    def test_a_link_to_the_launcher_finds_the_install(self):
+        self.command = os.path.join(self.scratch, "book-editor")
+        os.symlink(os.path.join(self.app, "bin", "book-editor"), self.command)
         started = self.launch(self.book)
         self.assertEqual(started["PYTHONPATH"].split(os.pathsep)[0], self.app)
 
