@@ -68,6 +68,14 @@
       "path": "pool/main/libs/libspelling/libspelling-common_0.4.8-1_all.deb"
     },
     {
+      "name": "libvte-2.91-common",
+      "source": "vte2.91",
+      "version": "0.80.1-1",
+      "architecture": "amd64",
+      "sha256": "bd5222b87ee30f75837c64c1bb78414ebb7fe0041dc8c8aea8f65e0572480e85",
+      "path": "pool/main/v/vte2.91/libvte-2.91-common_0.80.1-1_amd64.deb"
+    },
+    {
       "name": "libvte-2.91-gtk4-0",
       "source": "vte2.91",
       "version": "0.80.1-1",

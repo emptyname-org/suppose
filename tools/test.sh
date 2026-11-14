@@ -3,6 +3,17 @@
 set -eu
 root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 cd "$root"
+/usr/bin/python3 - "$root/tmp/test_runtime" <<'PY'
+import os
+import sys
+# Linux sun_path, allowing the largest PID and tempfile's eight-character suffix.
+size = len(os.fsencode(sys.argv[1] + "/book-editor-2147483647-xxxxxxxx/socket"))
+if size > 107:
+    sys.exit(
+        f"test: checkout path is too long for the editor socket ({size} bytes; "
+        "limit 107). Move the checkout to a shorter path."
+    )
+PY
 for command in xvfb-run xauth dbus-run-session import timeout flock; do
     if ! command -v "$command" >/dev/null; then
         echo "test: requires xvfb xauth dbus-daemon imagemagick coreutils ($command)" >&2

@@ -25,6 +25,21 @@ class BuildTest(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.root = Path(self.scratch.name)
 
+    def test_bundled_vte_common_needs_no_matching_host_version(self):
+        lock = json.loads((build.ROOT / "packages.lock").read_text())
+        library = next(p for p in lock["packages"] if p["name"] == "libvte-2.91-gtk4-0")
+        common = next(p for p in lock["packages"] if p["name"] == "libvte-2.91-common")
+        self.assertEqual(common["version"], library["version"])
+        dependency = f"libvte-2.91-common (= {library['version']})"
+        result = subprocess.CompletedProcess([], 0, stdout=dependency)
+        for installed in ({}, {"libvte-2.91-common": "99.0-1"}):
+            with (
+                patch.object(build, "installed", return_value=installed),
+                patch.object(build, "HOST_PACKAGES", ()),
+                patch.object(build, "run", return_value=result),
+            ):
+                build.check_dependencies([library, common], [Path("library.deb")])
+
     def test_bad_download_and_corrupt_cache_never_become_verified(self):
         package = {
             "name": "example",
