@@ -542,6 +542,39 @@ class ClaudeTest(EngineCase):
         self.assertEqual(called, ["--resume", self.kept("claude", opened + ".jsonl")])
         self.assertFalse(os.path.exists(self.report()))
 
+    def test_a_report_stays_until_where_claude_keeps_things_is_noted(self):
+        _status, (_option, session) = self.start()
+        note = engines.claim_file(os.getcwd(), "claude", "home")
+        os.unlink(note)  # the folder as copied to a machine that never ran it
+        os.mkdir(note)  # and that cannot note it
+        with open(self.project(session, "later"), "w") as target:
+            target.write("aside\n")
+        self.start()
+        self.assertTrue(os.path.exists(self.report()))
+        self.assertFalse(os.path.exists(self.kept("claude", session, "later")))
+        _status, called = self.start()  # still not: no memory this time
+        self.assertEqual(called, [])
+        self.assertTrue(os.path.exists(self.report()))
+        os.rmdir(note)
+        _status, called = self.start()
+        self.assertEqual(called[0], "--resume")
+        self.assertEqual(read(note), self.project() + "\n")
+        self.assertEqual(read(self.kept("claude", session, "later")), "aside\n")
+        self.assertFalse(os.path.exists(self.report()))
+
+    def test_where_claude_keeps_things_is_noted_whole_or_not_at_all(self):
+        os.close(engines.claim(os.getcwd(), "claude"))
+        note = engines.claim_file(os.getcwd(), "claude", "home")
+        engines.note_home(os.getcwd(), "/a")
+        refused = mock.patch("os.replace", side_effect=PermissionError("no"))
+        with refused, self.assertRaises(OSError):
+            engines.note_home(os.getcwd(), "/b")
+        engines.note_home(os.getcwd(), "/c\ud800")  # no name of a folder
+        self.assertEqual(read(note), "/a\n")
+        self.assertEqual(sorted(os.listdir(os.path.dirname(note))), ["home", "lock"])
+        with mock.patch("os.replace", side_effect=AssertionError("written again")):
+            engines.note_home(os.getcwd(), "/a")
+
     def test_of_what_agents_left_the_last_told_counts(self):
         self.start()
         ids = [str(uuid.uuid4()) for _each in range(3)]

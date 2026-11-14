@@ -296,11 +296,21 @@ def claude_home(folder):
 
 
 def note_home(folder, home):
+    """Keep where Claude Code said it keeps the folder's conversations,
+    whole or not at all."""
+    path = claim_file(folder, "claude", "home")
+    if read_word(path) == home:
+        return
+    partial = f"{path}.{os.getpid()}"
     try:
-        with open(claim_file(folder, "claude", "home"), "w", encoding="utf-8") as note:
+        with open(partial, "w", encoding="utf-8") as note:
             note.write(home + "\n")
-    except (OSError, ValueError):
-        pass  # then it is looked for
+        os.replace(partial, path)
+    except ValueError:
+        pass  # a name that cannot be written down: then it is looked for
+    finally:
+        if os.path.lexists(partial):
+            os.unlink(partial)
 
 
 def adopt_claude(folder, session):
@@ -323,7 +333,10 @@ def adopt_claude(folder, session):
                 return False
             source = max(found, key=os.path.getmtime)
             home = os.path.dirname(source)
-            note_home(folder, home)
+            try:
+                note_home(folder, home)
+            except OSError:
+                pass  # then it is looked for again
         record_folder(folder, "claude")
         take_over(source, target)
     beside = os.path.join(home or "", session)
@@ -386,19 +399,20 @@ def last_report(report):
 
 
 def follow_claude(folder, held, report):
-    """Make what Claude Code told last the folder's conversation. False
-    while an agent of another folder has that conversation: the record
-    stays, and the report is to be followed again, as after an OSError."""
+    """Make what Claude Code told last the folder's conversation, and note
+    where it keeps it. False while an agent of another folder has that
+    conversation: the record stays, and the report is to be followed
+    again, as after an OSError."""
     told = last_report(report)
     if told is None:
         return True
     session, home = told
-    if home is not None:
-        note_home(folder, home)
     if session != read_session(folder, "claude"):
         if not held.take(session):
             return False
         write_session(folder, "claude", session)
+    if home is not None:
+        note_home(folder, home)
     return True
 
 
