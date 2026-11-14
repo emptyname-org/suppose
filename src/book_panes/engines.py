@@ -15,12 +15,17 @@ The conversation is the one the engine had open last: /clear, /new and
 /resume in the engine change it. Claude Code tells through a hook, Codex
 shows by the rollout it keeps open.
 
+A copy of a folder has the conversations of its original. Claude Code goes
+on in each on its own; Codex knows a conversation by its id alone, so the
+copy waits for the original's agent to end before it takes the id over.
+
 Environment:
   BOOK_ENGINE   engine to run (default: the folder's choice, else claude)
   BOOK_CLAUDE   the claude command (default: claude)
   BOOK_CODEX    the codex command (default: codex)
 """
 
+import errno
 import fcntl
 import glob
 import hashlib
@@ -32,6 +37,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 
 STATE_DIR = ".book-editor"
@@ -44,6 +50,7 @@ TOOLS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"
 )
 WATCH_SECONDS = 1.0  # between looks at the conversation Codex has open
+CLOCK_SLACK = 0.1  # a file's time may lag the clock's by a tick
 MAX_HEADER_BYTES = 4 * 1024 * 1024
 ROLLOUT = re.compile(
     r"rollout-(\d{4})-(\d{2})-(\d{2})T[0-9-]+?-"
@@ -71,16 +78,32 @@ def read_word(path):
         return None
 
 
+def record_folder(folder, *parts):
+    """The folder's .book-editor, or a folder under it, made when missing.
+    It never appears without its .gitignore: conversations are not for a
+    repository the folder may be. One the user removed stays removed."""
+    top = os.path.join(folder, STATE_DIR)
+    if not os.path.isdir(top):
+        fresh = f"{top}.{os.getpid()}"
+        shutil.rmtree(fresh, ignore_errors=True)  # of a process that died here
+        os.mkdir(fresh, 0o700)
+        try:
+            with open(os.path.join(fresh, ".gitignore"), "w", encoding="ascii") as note:
+                note.write("*\n")
+            os.rename(fresh, top)
+        except OSError:
+            shutil.rmtree(fresh, ignore_errors=True)
+            if not os.path.isdir(top):  # not just made by another
+                raise
+    path = os.path.join(top, *parts)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
 def write_word(folder, name, word):
     """Record a word under the folder's .book-editor, whole or not at all."""
-    top = os.path.join(folder, STATE_DIR)
-    path = os.path.join(top, name)
-    fresh = not os.path.isdir(top)
-    os.makedirs(top, mode=0o700, exist_ok=True)
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    if fresh:  # conversations are not for a repository the folder may be
-        with open(os.path.join(top, ".gitignore"), "w", encoding="ascii") as target:
-            target.write("*\n")
+    directory = record_folder(folder, os.path.dirname(name))
+    path = os.path.join(directory, os.path.basename(name))
     partial = f"{path}.{os.getpid()}"
     try:
         with open(partial, "w", encoding="utf-8") as target:
@@ -89,6 +112,48 @@ def write_word(folder, name, word):
     finally:
         if os.path.exists(partial):
             os.unlink(partial)
+
+
+def take_over(source, target):
+    """Move a file, also to another filesystem. The target is there whole
+    or not at all; the source goes once it is."""
+    try:
+        os.rename(source, target)
+        return
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+    for stale in glob.glob(glob.escape(target) + ".*.part"):
+        os.unlink(stale)  # of a move that did not end
+    partial = f"{target}.{os.getpid()}.part"
+    try:
+        copy = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with open(source, "rb") as origin, open(copy, "wb") as written:
+            shutil.copyfileobj(origin, written)
+            written.flush()
+            os.fsync(written.fileno())
+        shutil.copystat(source, partial)
+        os.replace(partial, target)
+    finally:
+        if os.path.lexists(partial):
+            os.unlink(partial)
+    os.unlink(source)
+
+
+def take_over_folder(source, target):
+    """Move what a folder holds into another, file by file. What the other
+    has already stays where it is, in both."""
+    for directory, _folders, names in os.walk(source, topdown=False):
+        inside = os.path.relpath(directory, source)
+        for name in names:
+            goal = os.path.normpath(os.path.join(target, inside, name))
+            if not os.path.lexists(goal):
+                os.makedirs(os.path.dirname(goal), mode=0o700, exist_ok=True)
+                take_over(os.path.join(directory, name), goal)
+        try:
+            os.rmdir(directory)
+        except OSError:
+            pass  # something stays in it
 
 
 def chosen_engine(folder):
@@ -128,20 +193,14 @@ def folder_key(folder):
     return hashlib.sha256(os.fsencode(os.path.realpath(folder))).hexdigest()
 
 
-def claim(folder, engine):
-    """Take the folder's conversation with the engine for this process: a
-    locked descriptor to keep open while the engine runs, gone with the
-    process. None when another agent has it, or no lock can be kept."""
-    directory = os.path.join(
-        state_home(), "book-editor", "claims", folder_key(folder), engine
-    )
+def hold(*parts):
+    """A lock under the claims for this process: a locked descriptor to
+    keep open, gone with the process. None when another process has it, or
+    no lock can be kept."""
+    path = os.path.join(state_home(), "book-editor", "claims", *parts)
     try:
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        guard = os.open(
-            os.path.join(directory, "lock"),
-            os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC,
-            0o600,
-        )
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        guard = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
     except OSError:
         return None
     try:
@@ -150,6 +209,18 @@ def claim(folder, engine):
         os.close(guard)
         return None
     return guard
+
+
+def claim(folder, engine):
+    """Take the folder's conversation with the engine for this process,
+    while the engine runs. None when another agent has it."""
+    return hold(folder_key(folder), engine, "lock")
+
+
+def hold_session(engine, session):
+    """Take a conversation the engine knows by its id alone, whichever
+    folder has it. None when an agent of another folder has it."""
+    return hold(engine, session)
 
 
 # ---- Claude Code -----------------------------------------------------------
@@ -174,21 +245,21 @@ def earlier_session(folder):
 
 
 def adopt_claude(folder, session):
-    """Move the transcript Claude Code wrote into its own home to the folder.
-    True when the folder has the transcript."""
+    """Move what Claude Code wrote into its own home for the conversation
+    to the folder: the transcript, and what it set aside beside it, which
+    it goes on doing there. True when the folder has the transcript."""
     target = claude_transcript(folder, session)
-    if os.path.isfile(target):
-        return True
     config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    pattern = os.path.join(glob.escape(config), "projects", "*", session + ".jsonl")
-    found = sorted(glob.glob(pattern), key=os.path.getmtime)
-    if not found:
-        return False
-    os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
-    shutil.move(found[-1], target)
-    beside = found[-1].removesuffix(".jsonl")  # what the conversation set aside
-    if os.path.isdir(beside) and not os.path.exists(target.removesuffix(".jsonl")):
-        shutil.move(beside, target.removesuffix(".jsonl"))
+    projects = os.path.join(glob.escape(config), "projects", "*")
+    if not os.path.isfile(target):
+        found = glob.glob(os.path.join(projects, session + ".jsonl"))
+        if not found:
+            return False
+        record_folder(folder, "claude")
+        take_over(max(found, key=os.path.getmtime), target)
+    for beside in glob.glob(os.path.join(projects, session)):
+        if os.path.isdir(beside) and not os.path.islink(beside):
+            take_over_folder(beside, target.removesuffix(".jsonl"))
     return True
 
 
@@ -253,20 +324,37 @@ def folder_rollout(folder, session):
     return found[-1] if found else None
 
 
+def our_link(path):
+    """Whether a link in Codex's home is one of ours: it leads into the
+    record of a folder."""
+    try:
+        record = os.path.dirname(os.readlink(path))
+    except OSError:
+        return False
+    return (
+        os.path.basename(record) == "codex"
+        and os.path.basename(os.path.dirname(record)) == STATE_DIR
+    )
+
+
 def link_codex(folder, session):
     """Keep the conversation's rollout in the folder and a link to it in
     Codex's home, where Codex looks for it. A rollout Codex wrote into its
-    home moves to the folder. True when the conversation can be resumed."""
+    home moves to the folder. True when the conversation can be resumed.
+    The caller holds the conversation: no other folder's agent uses the
+    link meanwhile."""
     kept = folder_rollout(folder, session)
     for path in home_rollouts(session):
         if os.path.islink(path):
-            if kept is None or os.path.realpath(path) != os.path.realpath(kept):
-                os.unlink(path)  # leads to where the folder was
+            if kept is not None and os.path.realpath(path) == os.path.realpath(kept):
+                continue
+            if kept is None and os.path.exists(path):
+                return False  # the conversation of another folder
+            if our_link(path):
+                os.unlink(path)  # leads to where the folder was, or to its copy
         elif os.path.isfile(path):  # Codex wrote here: this is the current one
-            directory = os.path.join(os.path.abspath(folder), STATE_DIR, "codex")
-            os.makedirs(directory, mode=0o700, exist_ok=True)
-            kept = os.path.join(directory, os.path.basename(path))
-            shutil.move(path, kept)
+            kept = os.path.join(record_folder(folder, "codex"), os.path.basename(path))
+            take_over(path, kept)
     if kept is None:
         return False
     match = ROLLOUT.match(os.path.basename(kept))
@@ -278,7 +366,7 @@ def link_codex(folder, session):
     if not os.path.lexists(link):
         os.makedirs(os.path.dirname(link), exist_ok=True)
         os.symlink(kept, link)
-    return True
+    return os.path.realpath(link) == os.path.realpath(kept)
 
 
 def rollout_header(path):
@@ -312,11 +400,15 @@ def family(pid):
     return found
 
 
-def open_rollouts(pid):
-    """Rollouts the engine has open: Codex keeps open what it writes, in
-    its own process as long as it is given options (see codex_options)."""
+def processes():
+    return [int(name) for name in os.listdir("/proc") if name.isdigit()]
+
+
+def open_rollouts(members):
+    """Rollouts the processes have open: Codex keeps open what it writes,
+    in its own process as long as it is given options (see codex_options)."""
     found = set()
-    for member in family(pid):
+    for member in members:
         directory = f"/proc/{member}/fd"
         try:
             names = os.listdir(directory)
@@ -332,24 +424,55 @@ def open_rollouts(pid):
     return found
 
 
+def users_rollout(path):
+    """Id of the conversation a rollout is of, None for what Codex opened
+    for itself and for what is no rollout."""
+    match = ROLLOUT.match(os.path.basename(path))
+    payload = rollout_header(path)
+    if match is None or payload.get("id") != match.group(4):
+        return None
+    return match.group(4) if payload.get("thread_source") == "user" else None
+
+
 def current_codex(pid):
     """Id of the conversation the user has with the running Codex: of those
-    it has open the one written last. What Codex opened for itself is not
-    the user's."""
+    it has open the one written last."""
     latest, current = 0.0, None
-    for path in open_rollouts(pid):
-        match = ROLLOUT.match(os.path.basename(path))
-        payload = rollout_header(path)
-        if match is None or payload.get("id") != match.group(4):
-            continue
-        if payload.get("thread_source") != "user":
-            continue
+    for path in open_rollouts(family(pid)):
+        session = users_rollout(path)
         try:
             written = os.path.getmtime(path)
         except OSError:
             continue
-        if current is None or written > latest:
-            latest, current = written, match.group(4)
+        if session is not None and (current is None or written > latest):
+            latest, current = written, session
+    return current
+
+
+def unseen_codex(folder, since):
+    """Id of the conversation Codex wrote in the folder after the last look
+    at it and before its end: written since the time given, in Codex's
+    home, of this folder, and open in no process any more."""
+    place = os.path.realpath(folder)
+    elsewhere = None
+    latest, current = since - CLOCK_SLACK, None
+    for path in home_rollouts():
+        try:
+            written = os.path.getmtime(path)
+        except OSError:
+            continue
+        if written < latest or os.path.islink(path):
+            continue
+        session = users_rollout(path)
+        cwd = rollout_header(path).get("cwd")
+        if session is None or not isinstance(cwd, str):
+            continue
+        if os.path.realpath(cwd) != place:
+            continue
+        if elsewhere is None:
+            elsewhere = {os.path.realpath(held) for held in open_rollouts(processes())}
+        if os.path.realpath(path) not in elsewhere:
+            latest, current = written, session
     return current
 
 
@@ -374,15 +497,6 @@ def codex_options():
         + toml_string(socket_path)
         + "}",
     ]
-
-
-def codex_arguments(folder):
-    """Arguments that continue the folder's conversation, or None when a new
-    one starts and has to be found."""
-    session = read_session(folder, "codex")
-    if session is not None and link_codex(folder, session):
-        return ["resume", *codex_options(), session]
-    return None
 
 
 # ---- running the engine ----------------------------------------------------
@@ -444,32 +558,61 @@ def run_claude(folder, command, extra, claimed):
 
 
 def run_codex(folder, command, extra, claimed):
-    arguments = None
-    if claimed:
+    plain = [command, *codex_options(), *extra]
+    if not claimed:
+        return run(plain)
+    held = {}  # id of a conversation: its lock, for as long as Codex runs
+
+    def ours(session):
+        if session not in held:
+            guard = hold_session("codex", session)
+            if guard is None:
+                return False
+            held[session] = guard
+        return True
+
+    def note(session):
+        """Record the conversation as the folder's, unless it is one the
+        agent of another folder has."""
         try:
-            arguments = codex_arguments(folder)
+            if session is None or session == read_session(folder, "codex"):
+                return
+            if ours(session):
+                write_session(folder, "codex", session)
         except OSError:
             pass
-    argv = [command, *(arguments or codex_options()), *extra]
-    if not claimed:
-        return run(argv)
+
+    looked = [time.time()]
 
     def watch(pid):
-        session = current_codex(pid)
-        if session is not None and session != read_session(folder, "codex"):
-            try:
-                write_session(folder, "codex", session)
-            except OSError:
-                pass
+        now = time.time()
+        note(current_codex(pid))
+        looked[0] = now
 
-    status = run(argv, watch)
     try:
         session = read_session(folder, "codex")
-        if session is not None:  # the one resumed, or opened since
-            link_codex(folder, session)
-    except OSError:
-        pass  # stays in Codex's home, taken over at the next start
-    return status
+        if session is not None and not ours(session):
+            # the folder is a copy and the original's agent runs: a
+            # conversation of its own, off the record, until that one ends
+            return run(plain)
+        argv = plain
+        try:
+            if session is not None and link_codex(folder, session):
+                argv = [command, "resume", *codex_options(), session, *extra]
+        except OSError:
+            pass
+        status = run(argv, watch)
+        try:
+            note(unseen_codex(folder, looked[0]))
+            session = read_session(folder, "codex")
+            if session in held:  # the one resumed, or opened since
+                link_codex(folder, session)
+        except OSError:
+            pass  # stays in Codex's home, taken over at the next start
+        return status
+    finally:
+        for guard in held.values():
+            os.close(guard)
 
 
 RUNNERS = {"claude": run_claude, "codex": run_codex}

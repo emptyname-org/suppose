@@ -102,9 +102,13 @@ def call(params):
     """Result of a tools/call: the tool's text, or what went wrong as text
     the agent can act on."""
     name = params.get("name")
-    arguments = params.get("arguments") or {}
-    if name not in CALLS or not isinstance(arguments, dict):
-        raise BadCall(f"no such tool: {name}")
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}
+    if not isinstance(name, str) or name not in CALLS:
+        raise BadCall("no such tool")
+    if not isinstance(arguments, dict):
+        raise BadCall("arguments must be an object")
     try:
         text, failed = CALLS[name](arguments), False
     except client.Unanswered as error:
@@ -158,9 +162,15 @@ def serve(source, target):
         if not line.strip():
             continue
         try:
-            reply = answer(json.loads(line))
+            message = json.loads(line)
         except ValueError:
-            reply = failure(None, -32700, "not JSON")
+            message, reply = None, failure(None, -32700, "not JSON")
+        else:
+            try:
+                reply = answer(message)
+            except Exception as error:  # noqa: BLE001 - one message must not end the server
+                identity = message.get("id") if isinstance(message, dict) else None
+                reply = failure(identity, -32603, f"internal error: {error}")
         if reply is not None:
             target.write(json.dumps(reply, ensure_ascii=False) + "\n")
             target.flush()

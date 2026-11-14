@@ -80,6 +80,25 @@ class ProtocolTest(unittest.TestCase):
         reply = mcp.answer(request("tools/call", {"name": "view", "arguments": 1}))
         self.assertEqual(reply["error"]["code"], -32602)
 
+    def test_a_tool_name_that_is_no_text_is_refused(self):
+        for name in ([], {}, 5, None):
+            reply = mcp.answer(request("tools/call", {"name": name}))
+            self.assertEqual(reply["error"]["code"], -32602)
+        reply = mcp.answer(request("tools/call", {"name": "view", "arguments": []}))
+        self.assertEqual(reply["error"]["code"], -32602)
+
+    def test_after_a_message_that_breaks_the_server_the_next_is_served(self):
+        lines = [
+            json.dumps(request("tools/call", {"name": "view"}, identity=3)),
+            json.dumps(request("ping", identity=4)),
+        ]
+        target = io.StringIO()
+        with mock.patch.object(mcp, "call", side_effect=RuntimeError("broken")):
+            mcp.serve(io.StringIO("\n".join(lines) + "\n"), target)
+        first, second = (json.loads(line) for line in target.getvalue().splitlines())
+        self.assertEqual((first["id"], first["error"]["code"]), (3, -32603))
+        self.assertEqual((second["id"], second["result"]), (4, {}))
+
     def test_messages_come_and_go_a_line_each(self):
         lines = [
             json.dumps(request("ping", identity=7)),

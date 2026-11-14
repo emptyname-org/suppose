@@ -2,6 +2,7 @@
 transcript is kept."""
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -28,6 +29,7 @@ while [ $# -gt 0 ]; do
     case $1 in
     --session-id)
         mkdir -p "$CLAUDE_CONFIG_DIR/projects/-a-book/$2"
+        echo aside >"$CLAUDE_CONFIG_DIR/projects/-a-book/$2/note"
         echo first >"$CLAUDE_CONFIG_DIR/projects/-a-book/$2.jsonl"
         shift
         ;;
@@ -60,8 +62,9 @@ for word; do printf '%s\\n' "$word" >>"$OUT"; done
 rollout() {
     day=$CODEX_HOME/sessions/2026/11/14
     mkdir -p "$day"
-    printf '{"type":"session_meta","payload":{"id":"%s","thread_source":"%s"}}\\n' \\
-        "$1" "${FAKE_SOURCE:-user}" >"$day/rollout-2026-11-14T10-00-00-$1.jsonl"
+    printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s","thread_source":"%s"}}\\n' \\
+        "$1" "${FAKE_CWD:-$PWD}" "${FAKE_SOURCE:-user}" \\
+        >"$day/rollout-2026-11-14T10-00-00-$1.jsonl"
     exec 4>>"$day/rollout-2026-11-14T10-00-00-$1.jsonl"
 }
 if [ "$1" = resume ]; then
@@ -137,6 +140,26 @@ class EngineCase(unittest.TestCase):
     def kept(self, *parts):
         return os.path.join(os.getcwd(), ".book-editor", *parts)
 
+    def another_filesystem(self):
+        """Transcripts cannot be renamed into place, as across filesystems."""
+        rename = os.rename
+
+        def refuse(source, target):
+            if ".jsonl" in os.path.basename(source):
+                raise OSError(errno.EXDEV, "another filesystem")
+            rename(source, target)
+
+        return mock.patch("os.rename", refuse)
+
+    def full_disk(self):
+        """A copy stops halfway."""
+
+        def stop(origin, written):
+            written.write(origin.read(2))
+            raise OSError(errno.ENOSPC, "full")
+
+        return mock.patch("shutil.copyfileobj", stop)
+
     @contextlib.contextmanager
     def another_agent(self, engine):
         """The folder's conversation is in use by another agent meanwhile."""
@@ -173,6 +196,23 @@ class RecordTest(EngineCase):
         self.assertFalse(os.path.exists(self.kept(".gitignore")))
 
     @unittest.skipIf(os.geteuid() == 0, "root writes anywhere")
+    def test_the_record_does_not_appear_without_its_gitignore(self):
+        with mock.patch("os.rename", side_effect=OSError(errno.ENOSPC, "full")):
+            self.assertFalse(engines.choose_engine(self.book, "codex"))
+        self.assertEqual(os.listdir(self.book), [])
+        self.assertTrue(engines.choose_engine(self.book, "codex"))
+        self.assertEqual(read(self.kept(".gitignore")), "*\n")
+
+    def test_a_record_another_made_meanwhile_is_used(self):
+        def late(_source, target):
+            os.makedirs(os.path.join(target, "claude"))
+            raise OSError(errno.ENOTEMPTY, "there")
+
+        with mock.patch("os.rename", late):
+            made = engines.record_folder(self.book, "codex")
+        self.assertEqual(made, self.kept("codex"))
+        self.assertEqual(sorted(os.listdir(self.book)), [".book-editor"])
+
     def test_a_folder_that_takes_no_record_says_so(self):
         os.chmod(self.book, 0o500)
         self.addCleanup(os.chmod, self.book, 0o700)
@@ -193,6 +233,56 @@ class RecordTest(EngineCase):
     def test_an_unknown_engine_name_runs_claude(self):
         _status, called = self.agent("eliza")
         self.assertEqual(called[0], "--append-system-prompt")
+
+
+class MoveTest(EngineCase):
+    def setUp(self):
+        super().setUp()
+        self.source = os.path.join(self.scratch, "from.jsonl")
+        self.target = os.path.join(self.book, "to.jsonl")
+        with open(self.source, "w") as target:
+            target.write("whole\n")
+        os.chmod(self.source, 0o640)
+
+    def test_a_move_within_the_filesystem(self):
+        engines.take_over(self.source, self.target)
+        self.assertEqual(read(self.target), "whole\n")
+        self.assertFalse(os.path.exists(self.source))
+
+    def test_a_move_to_another_filesystem_arrives_whole(self):
+        with open(self.target + ".7.part", "w") as stale:
+            stale.write("wh")
+        with self.another_filesystem():
+            engines.take_over(self.source, self.target)
+        self.assertEqual(read(self.target), "whole\n")
+        self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o640)
+        self.assertEqual(os.listdir(self.book), ["to.jsonl"])
+        self.assertFalse(os.path.exists(self.source))
+
+    def test_a_move_cut_short_leaves_the_source_and_no_target(self):
+        with self.another_filesystem(), self.full_disk(), self.assertRaises(OSError):
+            engines.take_over(self.source, self.target)
+        self.assertEqual(os.listdir(self.book), [])
+        self.assertEqual(read(self.source), "whole\n")
+
+    def test_another_failure_of_a_move_is_passed_on(self):
+        with self.assertRaises(FileNotFoundError):
+            engines.take_over(self.source + ".none", self.target)
+
+    def test_a_folder_moves_file_by_file_and_keeps_what_is_there(self):
+        source, target = os.path.join(self.scratch, "aside"), self.kept("aside")
+        for path, text in (
+            (os.path.join(source, "deep", "down", "new"), "new\n"),
+            (os.path.join(source, "both"), "theirs\n"),
+            (os.path.join(target, "both"), "ours\n"),
+        ):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as written:
+                written.write(text)
+        engines.take_over_folder(source, target)
+        self.assertEqual(read(os.path.join(target, "deep", "down", "new")), "new\n")
+        self.assertEqual(read(os.path.join(target, "both")), "ours\n")
+        self.assertEqual(os.listdir(source), ["both"])
 
 
 class ClaudeTest(EngineCase):
@@ -217,7 +307,7 @@ class ClaudeTest(EngineCase):
         self.assertEqual(str(uuid.UUID(session)), session)
         self.assertEqual(read(self.kept("claude", "session")), session + "\n")
         self.assertEqual(read(self.kept("claude", session + ".jsonl")), "first\n")
-        self.assertTrue(os.path.isdir(self.kept("claude", session)))
+        self.assertEqual(read(self.kept("claude", session, "note")), "aside\n")
         self.assertEqual(self.in_home(), [])
 
     def test_the_next_start_resumes_the_transcript_in_the_folder(self):
@@ -278,6 +368,39 @@ class ClaudeTest(EngineCase):
         _status, called = self.start()
         self.assertEqual(called, ["--resume", self.kept("claude", session + ".jsonl")])
         self.assertEqual(read(self.kept("claude", "session")), session + "\n")
+        self.assertEqual(read(self.kept(".gitignore")), "*\n")
+
+    def test_what_claude_sets_aside_while_resumed_moves_in_as_well(self):
+        _status, (_option, session) = self.start()
+        aside = os.path.join(self.config, "projects", "-a-book", session)
+        os.makedirs(os.path.join(aside, "subagents"))
+        for name, text in (("subagents/agent-1.jsonl", "sub\n"), ("note", "other\n")):
+            with open(os.path.join(aside, name), "w") as target:
+                target.write(text)
+        self.start()
+        self.assertEqual(
+            read(self.kept("claude", session, "subagents", "agent-1.jsonl")), "sub\n"
+        )
+        self.assertEqual(read(self.kept("claude", session, "note")), "aside\n")
+        self.assertEqual(self.in_home(), [os.path.join(aside, "note")])
+
+    def test_a_transcript_cut_short_on_the_way_in_is_not_taken_for_whole(self):
+        session = str(uuid.uuid4())
+        engines.write_session(self.book, "claude", session)
+        left = os.path.join(self.config, "projects", "-a-book", session + ".jsonl")
+        os.makedirs(os.path.dirname(left))
+        with open(left, "w") as target:
+            target.write("left\n")
+        with self.another_filesystem(), self.full_disk():
+            _status, called = self.start()
+        self.assertEqual(called, [])  # no memory this time
+        self.assertEqual(os.listdir(self.kept("claude")), ["session"])
+        self.assertEqual(read(left), "left\n")
+        with self.another_filesystem():
+            _status, called = self.start()
+        self.assertEqual(called[0], "--resume")
+        self.assertEqual(read(self.kept("claude", session + ".jsonl")), "left\nmore\n")
+        self.assertEqual(self.in_home(), [])
 
     def test_a_conversation_opened_in_claude_becomes_the_folders(self):
         _status, (_option, first) = self.start()
@@ -388,13 +511,17 @@ class CodexTest(EngineCase):
         watch.start()
         self.addCleanup(watch.stop)
 
-    def rollout(self, session, source="user"):
+    def rollout(self, session, source="user", cwd=None):
         """A rollout in Codex's home that nothing has open."""
         day = os.path.dirname(self.link)
         os.makedirs(day, exist_ok=True)
         path = os.path.join(day, f"rollout-2026-11-14T10-00-00-{session}.jsonl")
         header = {"type": "session_meta"}
-        header["payload"] = {"id": session, "thread_source": source}
+        header["payload"] = {
+            "id": session,
+            "cwd": cwd or self.book,
+            "thread_source": source,
+        }
         with open(path, "w") as target:
             target.write(json.dumps(header) + "\n")
         return path
@@ -484,8 +611,104 @@ class CodexTest(EngineCase):
         self.start(FAKE_SOURCE="subagent")
         self.assertFalse(os.path.exists(self.kept("codex", "session")))
 
-    def test_a_conversation_codex_does_not_have_open_is_not_ours(self):
+    def at_its_end(self, **changes):
+        """Codex ends before a look at what it has open."""
+        with mock.patch.object(engines, "WATCH_SECONDS", 30):
+            return self.start(FAKE_SLEEP="0", **changes)
+
+    def test_a_conversation_opened_just_before_codex_ends_is_the_folders(self):
+        self.at_its_end()
+        self.assertEqual(read(self.kept("codex", "session")), self.session + "\n")
+        self.assertEqual(os.readlink(self.link), self.kept("codex", self.name))
+
+    def test_at_the_end_a_conversation_of_another_folder_is_not_ours(self):
+        self.at_its_end(FAKE_CWD=self.scratch)
+        self.assertFalse(os.path.exists(self.kept("codex", "session")))
+
+    def test_at_the_end_what_codex_spawned_is_not_ours(self):
+        self.at_its_end(FAKE_SOURCE="subagent")
+        self.assertFalse(os.path.exists(self.kept("codex", "session")))
+
+    def test_at_the_end_a_conversation_from_before_the_start_is_not_ours(self):
         other = self.rollout(str(uuid.uuid4()))
+        os.utime(other, (time.time() - 60, time.time() - 60))
+        self.at_its_end(FAKE_SOURCE="subagent")
+        self.assertFalse(os.path.exists(self.kept("codex", "session")))
+
+    def test_at_the_end_a_conversation_open_in_a_process_is_not_ours(self):
+        other = self.rollout(str(uuid.uuid4()))
+        os.utime(other, (time.time() + 60, time.time() + 60))
+        with open(other, "a"):
+            self.at_its_end(FAKE_SOURCE="subagent")
+        self.assertFalse(os.path.exists(self.kept("codex", "session")))
+        self.at_its_end(FAKE_SOURCE="subagent")  # closed: it counts
+        self.assertTrue(os.path.exists(self.kept("codex", "session")))
+
+    def copy_of_the_book(self):
+        copy = os.path.join(self.scratch, "copy")
+        shutil.copytree(self.book, copy, symlinks=True)
+        return copy
+
+    def test_a_copy_of_the_folder_waits_while_the_originals_agent_runs(self):
+        self.start()
+        os.chdir(self.copy_of_the_book())
+        guard = engines.hold_session("codex", self.session)
+        try:
+            _status, called = self.start(FAKE_ID=str(uuid.uuid4()))
+        finally:
+            os.close(guard)
+        self.assertEqual(called, [])
+        self.assertEqual(read(self.kept("codex", "session")), self.session + "\n")
+        self.assertEqual(
+            os.readlink(self.link),
+            os.path.join(self.book, ".book-editor/codex", self.name),
+        )
+
+    def test_a_copy_of_the_folder_goes_on_by_itself_once_that_agent_ended(self):
+        self.start()
+        original = read(self.kept("codex", self.name))
+        os.chdir(self.copy_of_the_book())
+        _status, called = self.start()
+        self.assertEqual(called, ["resume", self.session])
+        self.assertEqual(os.readlink(self.link), self.kept("codex", self.name))
+        self.assertEqual(read(self.kept("codex", self.name)), original + "more\n")
+        os.chdir(self.book)
+        self.assertEqual(read(self.kept("codex", self.name)), original)
+
+    def test_a_record_of_another_folders_conversation_starts_a_new_one(self):
+        self.start()
+        theirs = self.kept("codex", self.name)
+        other = os.path.join(self.scratch, "other")
+        os.makedirs(other)
+        engines.write_session(other, "codex", self.session)
+        os.chdir(other)
+        opened = str(uuid.uuid4())
+        _status, called = self.start(FAKE_ID=opened)
+        self.assertEqual(called, [])
+        self.assertEqual(os.readlink(self.link), theirs)
+        self.assertEqual(read(self.kept("codex", "session")), opened + "\n")
+
+    def test_a_link_that_is_not_the_editors_is_left_alone(self):
+        self.start()
+        mine = os.path.join(self.scratch, "mine", self.name)
+        os.makedirs(os.path.dirname(mine))
+        shutil.copy(self.kept("codex", self.name), mine)
+        os.unlink(self.link)
+        os.symlink(mine, self.link)
+        _status, called = self.start(FAKE_ID=str(uuid.uuid4()))
+        self.assertEqual(called, [])
+        self.assertEqual(os.readlink(self.link), mine)
+
+    def test_a_conversation_another_folders_agent_has_is_not_recorded(self):
+        guard = engines.hold_session("codex", self.session)
+        try:
+            self.start()
+        finally:
+            os.close(guard)
+        self.assertFalse(os.path.exists(self.kept("codex", "session")))
+
+    def test_a_conversation_codex_does_not_have_open_is_not_ours(self):
+        other = self.rollout(str(uuid.uuid4()), cwd=self.scratch)
         os.utime(other, (time.time() + 60, time.time() + 60))
         self.start()
         self.assertEqual(read(self.kept("codex", "session")), self.session + "\n")
