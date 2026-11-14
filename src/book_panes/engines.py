@@ -15,9 +15,11 @@ where it stopped.
 The conversation is the one the engine had open last: /clear, /new and
 /resume in the engine change it. Only the engine's own word counts for
 that. Claude Code tells through a hook, which reports to the agent that
-runs it. Codex shows by the rollouts it keeps open, looked at every
-WATCH_SECONDS: what it opens later than the last look before its end is
-not followed, the folder then goes on with the conversation before.
+runs it; a report stays until the folder has recorded it, for the next
+start if need be. Codex shows by the rollouts it keeps open, looked at
+every WATCH_SECONDS: what it opens later than the last look before its end
+is not followed, the folder then goes on with the conversation before, or
+with none when that was its first; the rollout stays in Codex's home.
 
 An agent holds a lock on each conversation it uses. A copy of a folder has
 the conversations of its original; while an agent of the original runs,
@@ -359,11 +361,12 @@ def report_claude(report, source):
 
 def last_report(report):
     """What Claude Code told last: the id of the conversation, and the
-    folder in its home it keeps it in or None. None when it told nothing."""
+    folder in its home it keeps it in or None. None when it told nothing.
+    A report that cannot be read now is an OSError, not nothing."""
     try:
-        with open(report, encoding="utf-8") as source:
+        with open(report, "rb") as source:
             lines = source.read().splitlines()
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
     for line in reversed(lines):
         try:
@@ -383,39 +386,47 @@ def last_report(report):
 
 
 def follow_claude(folder, held, report):
-    """Make what Claude Code told last the folder's conversation, unless an
-    agent of another folder has it."""
+    """Make what Claude Code told last the folder's conversation. False
+    while an agent of another folder has that conversation: the record
+    stays, and the report is to be followed again, as after an OSError."""
     told = last_report(report)
     if told is None:
-        return
+        return True
     session, home = told
     if home is not None:
         note_home(folder, home)
-    if session != read_session(folder, "claude") and held.take(session):
+    if session != read_session(folder, "claude"):
+        if not held.take(session):
+            return False
         write_session(folder, "claude", session)
+    return True
 
 
 def claude_arguments(folder, held, report):
-    """Arguments that continue the folder's conversation or start it; none
-    when an agent of another folder has it."""
-    for left in glob.glob(glob.escape(claim_file(folder, "claude", "opened.")) + "*"):
-        follow_claude(folder, held, left)  # of an agent that died
-        os.unlink(left)
-    os.close(os.open(report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    """Arguments that continue the folder's conversation or start it, with
+    the report made for Claude Code to tell in; none, and no report, when
+    an agent of another folder has the conversation."""
+    left = glob.glob(glob.escape(claim_file(folder, "claude", "opened.")) + "*")
+    for earlier in sorted(left, key=os.path.getmtime):  # of agents that ended
+        if not follow_claude(folder, held, earlier):
+            return []  # kept: nothing newer is recorded before it
+        os.unlink(earlier)
     recorded = read_session(folder, "claude")
     session = recorded or earlier_session(folder)
     if session is not None and not held.take(session):
         return []
-    tell = ["--settings", claude_settings(report)]
     if session is not None and adopt_claude(folder, session):
         if session != recorded:
             write_session(folder, "claude", session)
-        return [*tell, "--resume", claude_transcript(folder, session)]
-    # never reuse an id: claude refuses one that is taken
-    session = str(uuid.uuid4())
-    held.take(session)
-    write_session(folder, "claude", session)
-    return [*tell, "--session-id", session]
+        which = ["--resume", claude_transcript(folder, session)]
+    else:
+        # never reuse an id: claude refuses one that is taken
+        session = str(uuid.uuid4())
+        held.take(session)
+        write_session(folder, "claude", session)
+        which = ["--session-id", session]
+    os.close(os.open(report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    return ["--settings", claude_settings(report), *which]
 
 
 # ---- Codex -----------------------------------------------------------------
@@ -625,23 +636,25 @@ def run_claude(folder, command, extra, claimed):
         return run([*start, *extra])
     held = Held("claude")
     report = claim_file(folder, "claude", f"opened.{os.getpid()}")
-    seen = [0]
+    arguments = []
+    followed = 0  # size of the report when all it told was recorded
 
     def follow(_pid=None):
+        nonlocal followed
         try:
             size = os.stat(report).st_size
-            if size != seen[0]:
-                seen[0] = size
-                follow_claude(folder, held, report)
+            if size != followed and follow_claude(folder, held, report):
+                followed = size
         except OSError:
-            pass  # the folder keeps the conversation before
+            pass  # tried again at the next look
 
     try:
-        arguments = []
         try:
             arguments = claude_arguments(folder, held, report)
         except OSError:
             pass  # no record, no memory of the conversation
+        if not arguments:
+            return run([*start, *extra])
         status = run([*start, *arguments, *extra], follow)
         follow()
         try:
@@ -653,8 +666,13 @@ def run_claude(folder, command, extra, claimed):
         return status
     finally:
         held.close()
-        if os.path.lexists(report):
-            os.unlink(report)
+        try:
+            # ours only with arguments; what it told and the folder has not
+            # recorded stays for the next start
+            if arguments and os.stat(report).st_size == followed:
+                os.unlink(report)
+        except OSError:
+            pass
 
 
 def run_codex(folder, command, extra, claimed):

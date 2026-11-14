@@ -15,8 +15,10 @@ agent's terminal on the right.
 - **Conversations**: the folder keeps one for each engine in `.suppose/`,
   transcripts included, and goes on with it when opened again, also after it
   was moved or copied. `/clear`, `/new` and `/resume` in the engine change the
-  folder's conversation. `.suppose/.gitignore` keeps them out of a
-  repository.
+  folder's conversation. Codex's is read from the files it has open, about
+  four times a second: one it opens just before it ends can be missed; the
+  folder then keeps the one before, and the missed one stays in Codex's home.
+  `.suppose/.gitignore` keeps them out of a repository.
 - **Channel**: the agent reads and changes the text open in the editor, saved
   or not. Every change is one undo step in the editor. Codex has the same as
   the tools `view` and `edit` of its MCP server `suppose`.
@@ -58,7 +60,7 @@ Commands:
                   # packages (needs the network)
     make clean    # removes dist/suppose; tools and downloads stay
 
-`make test` needs a checkout path of at most 51 bytes: the editor's socket
+`make test` needs a checkout path of at most 55 bytes: the editor's socket
 lives below it during the tests, and a socket path is short.
 
 ## Install

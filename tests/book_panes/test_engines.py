@@ -482,6 +482,79 @@ class ClaudeTest(EngineCase):
             os.close(guard)
         self.assertEqual(read(self.kept("claude", "session")), first + "\n")
         self.assertTrue(os.path.isfile(self.project(opened + ".jsonl")))
+        self.assertTrue(os.path.exists(self.report()))  # for the next start
+        _status, called = self.start()  # the other agent ended
+        self.assertEqual(called, ["--resume", self.kept("claude", opened + ".jsonl")])
+        self.assertFalse(os.path.exists(self.report()))
+
+    def failing_record(self, session, times):
+        """The folder does not take the conversation, so many times."""
+        write, left = engines.write_session, [times]
+
+        def refuse(folder, engine, word):
+            if word == session and left[0] > 0:
+                left[0] -= 1
+                raise PermissionError(errno.EACCES, "no")
+            write(folder, engine, word)
+
+        return mock.patch.object(engines, "write_session", refuse)
+
+    def test_a_conversation_the_folder_did_not_take_at_once_is_tried_again(self):
+        self.start()
+        opened = str(uuid.uuid4())
+        with self.failing_record(opened, 1):
+            self.start(FAKE_CLEAR=opened, FAKE_SLEEP="0.7")
+        self.assertEqual(read(self.kept("claude", "session")), opened + "\n")
+        self.assertEqual(read(self.kept("claude", opened + ".jsonl")), "cleared\n")
+        self.assertFalse(os.path.exists(self.report()))
+
+    def test_a_conversation_the_folder_never_took_waits_for_the_next_start(self):
+        _status, (_option, first) = self.start()
+        opened = str(uuid.uuid4())
+        with self.failing_record(opened, 1000):
+            self.start(FAKE_CLEAR=opened)
+            self.assertEqual(read(self.kept("claude", "session")), first + "\n")
+            self.assertTrue(os.path.exists(self.report()))
+            _status, called = self.start()  # still not: no memory this time
+            self.assertEqual(called, [])
+            self.assertTrue(os.path.exists(self.report()))
+        _status, called = self.start()
+        self.assertEqual(called, ["--resume", self.kept("claude", opened + ".jsonl")])
+        self.assertFalse(os.path.exists(self.report()))
+
+    def test_what_an_agent_left_untaken_waits_while_another_folder_has_it(self):
+        _status, (_option, first) = self.start()
+        opened = str(uuid.uuid4())
+        with open(self.project(opened + ".jsonl"), "w") as target:
+            target.write("told\n")
+        told = {"session": opened, "transcript": self.project(opened + ".jsonl")}
+        with open(self.report(), "w") as target:  # under this agent's own name
+            target.write(json.dumps(told) + "\n")
+        guard = engines.hold("claude", opened)
+        try:
+            _status, called = self.start(FAKE_SLEEP="0.4")
+        finally:
+            os.close(guard)
+        self.assertEqual(called, [])  # off the record: nothing newer is written
+        self.assertEqual(read(self.kept("claude", "session")), first + "\n")
+        self.assertEqual(json.loads(read(self.report())), told)
+        _status, called = self.start()
+        self.assertEqual(called, ["--resume", self.kept("claude", opened + ".jsonl")])
+        self.assertFalse(os.path.exists(self.report()))
+
+    def test_of_what_agents_left_the_last_told_counts(self):
+        self.start()
+        ids = [str(uuid.uuid4()) for _each in range(3)]
+        for age, (pid, session) in enumerate(zip((30, 10, 20), ids, strict=True)):
+            with open(self.project(session + ".jsonl"), "w") as target:
+                target.write("told\n")
+            with open(self.report(pid), "w") as target:
+                target.write(json.dumps({"session": session}) + "\n")
+            os.utime(self.report(pid), (1000 + age, 1000 + age))
+        _status, called = self.start()
+        self.assertEqual(called, ["--resume", self.kept("claude", ids[2] + ".jsonl")])
+        left = sorted(os.listdir(os.path.dirname(self.report())))
+        self.assertEqual(left, ["home", "lock"])
 
     def test_the_hook_finds_the_agents_file_under_any_name(self):
         os.environ["XDG_STATE_HOME"] = os.path.join(self.scratch, 'it\'s "a" $HOME')
@@ -531,6 +604,11 @@ class ClaudeTest(EngineCase):
             self.assertEqual(engines.hook_main([]), 0)
         self.assertEqual(said.getvalue(), "")
         self.assertIsNone(engines.last_report(report + ".none"))
+        with open(report, "ab") as target:
+            target.write(b'\xff{"session": "' + session.encode() + b'"}\n')
+        self.assertEqual(engines.last_report(report), (session, "/home/x"))
+        with self.assertRaises(OSError):  # not nothing: to be read again
+            engines.last_report(os.path.dirname(report))
 
     def test_a_damaged_record_starts_a_new_conversation(self):
         engines.write_word(self.book, "claude/session", "not an id")
