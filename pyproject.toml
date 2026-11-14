@@ -1,0 +1,28 @@
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+extend-include = ["src/bin/book-agent", "src/bin/book-view", "src/bin/book-edit"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_ignores = true
+check_untyped_defs = true
+scripts_are_modules = true
+
+[[tool.mypy.overrides]]
+module = ["gi", "gi.*", "apostrophe", "apostrophe.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+branch = true
+parallel = true
+source = ["src/book_panes", "dist/book-editor/book_panes"]
+data_file = "tmp/coverage/.coverage"
+
+[tool.coverage.paths]
+book_panes = ["src/book_panes", "*/dist/book-editor/book_panes"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+precision = 1

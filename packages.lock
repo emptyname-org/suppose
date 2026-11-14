@@ -1,0 +1,95 @@
+{
+  "suite": "trixie",
+  "architecture": "amd64",
+  "snapshot": "20250901T000000Z",
+  "packages": [
+    {
+      "name": "apostrophe",
+      "source": "apostrophe",
+      "version": "3.2-3",
+      "architecture": "all",
+      "sha256": "dd5054f92ac73c06ab9a27e4f1bfec70ca29bc5162178a1f998d47d3f47a3ba5",
+      "path": "pool/main/a/apostrophe/apostrophe_3.2-3_all.deb"
+    },
+    {
+      "name": "gir1.2-gtksource-5",
+      "source": "gtksourceview5",
+      "version": "5.16.0-1",
+      "architecture": "amd64",
+      "sha256": "c1d15de1bfcd381a7587fbc078124844243c78267455cd5d7552458b511b7ad5",
+      "path": "pool/main/g/gtksourceview5/gir1.2-gtksource-5_5.16.0-1_amd64.deb"
+    },
+    {
+      "name": "gir1.2-spelling-1",
+      "source": "libspelling",
+      "version": "0.4.8-1",
+      "architecture": "amd64",
+      "sha256": "f5bd71b8f7654339c4a69266230a2666e169db0a1a0ad834a3699b90278cfcd3",
+      "path": "pool/main/libs/libspelling/gir1.2-spelling-1_0.4.8-1_amd64.deb"
+    },
+    {
+      "name": "gir1.2-vte-3.91",
+      "source": "vte2.91",
+      "version": "0.80.1-1",
+      "architecture": "amd64",
+      "sha256": "9c56a7946d745b4ea723be146e928d0f912d7a1dded3c93bd50902e4c9761985",
+      "path": "pool/main/v/vte2.91/gir1.2-vte-3.91_0.80.1-1_amd64.deb"
+    },
+    {
+      "name": "libgtksourceview-5-0",
+      "source": "gtksourceview5",
+      "version": "5.16.0-1",
+      "architecture": "amd64",
+      "sha256": "d1cfe66037f51d856dead3b01fa3c7950270b510916096bd0bdd76395fdd4a2d",
+      "path": "pool/main/g/gtksourceview5/libgtksourceview-5-0_5.16.0-1_amd64.deb"
+    },
+    {
+      "name": "libgtksourceview-5-common",
+      "source": "gtksourceview5",
+      "version": "5.16.0-1",
+      "architecture": "all",
+      "sha256": "40a20a7495237c5f8f6e438b5287ed2d6f271b7ae92fa5880d45bcb9d74be31d",
+      "path": "pool/main/g/gtksourceview5/libgtksourceview-5-common_5.16.0-1_all.deb"
+    },
+    {
+      "name": "libspelling-1-2",
+      "source": "libspelling",
+      "version": "0.4.8-1",
+      "architecture": "amd64",
+      "sha256": "8dc180d2de5e317b543df66025e3701399762bac3fefc86c15ec3e11cd75e83f",
+      "path": "pool/main/libs/libspelling/libspelling-1-2_0.4.8-1_amd64.deb"
+    },
+    {
+      "name": "libspelling-common",
+      "source": "libspelling",
+      "version": "0.4.8-1",
+      "architecture": "all",
+      "sha256": "1eed7b6c14ea8a602323ae5b94fd882bf0c83dcaecb37adc58e5fe5711b620cc",
+      "path": "pool/main/libs/libspelling/libspelling-common_0.4.8-1_all.deb"
+    },
+    {
+      "name": "libvte-2.91-gtk4-0",
+      "source": "vte2.91",
+      "version": "0.80.1-1",
+      "architecture": "amd64",
+      "sha256": "a146d7ac3f809d201ad6f9c50fd012b1e43c7f2b824863215129f1cd70aa8c3b",
+      "path": "pool/main/v/vte2.91/libvte-2.91-gtk4-0_0.80.1-1_amd64.deb"
+    },
+    {
+      "name": "python3-pypandoc",
+      "source": "pypandoc",
+      "version": "1.15+ds0-1",
+      "architecture": "all",
+      "sha256": "9e615fca45e91d023f78bcef22f24300e2a5f90c31612c958e86f532bdb0a4c9",
+      "path": "pool/main/p/pypandoc/python3-pypandoc_1.15+ds0-1_all.deb"
+    },
+    {
+      "name": "python3-zombie-telnetlib",
+      "source": "python-zombie-telnetlib",
+      "version": "1.001",
+      "architecture": "all",
+      "sha256": "4a76c3c82c8586d81cc447257193fb1879873f5941fb62d5ee4065c30b2d84b8",
+      "path": "pool/main/p/python-zombie-telnetlib/python3-zombie-telnetlib_1.001_all.deb"
+    }
+  ]
+}
