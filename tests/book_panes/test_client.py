@@ -185,13 +185,29 @@ class BrokenEditorTest(unittest.TestCase):
         with self.assertRaises(client.Unanswered):
             client.ask({"op": "view"}, self.path, timeout=0.3)
 
-    def test_endless_answer_is_cut_off(self):
-        self.serve(lambda connection: connection.sendall(b"x" * 100000))
+    def flood(self, connection):
+        while not self.stop.is_set():
+            connection.sendall(b"x" * 65536)
+
+    def test_answer_that_never_pauses_still_ends_at_the_deadline(self):
+        self.serve(self.flood)
+        start = time.monotonic()
         with (
-            mock.patch.object(client, "MAX_REPLY_BYTES", 1000),
-            self.assertRaises(client.Unanswered),
+            mock.patch.object(client, "MAX_REPLY_BYTES", 1 << 40),
+            self.assertRaisesRegex(client.Unanswered, "timed out"),
         ):
-            client.ask({"op": "view"}, self.path, timeout=5)
+            client.ask({"op": "view"}, self.path, timeout=0.4)
+        self.assertLess(time.monotonic() - start, 2)
+
+    def test_answer_beyond_the_size_limit_is_refused_even_when_whole(self):
+        whole = json.dumps({"ok": True, "text": "x" * 5000}).encode() + b"\n"
+        for answer in (whole, b"x" * 100000):
+            self.serve(lambda connection, answer=answer: connection.sendall(answer))
+            with (
+                mock.patch.object(client, "MAX_REPLY_BYTES", 1000),
+                self.assertRaisesRegex(client.Unanswered, "too long"),
+            ):
+                client.ask({"op": "view"}, self.path, timeout=5)
 
     def test_answers_that_are_not_replies_count_as_none(self):
         for answer in (b"", b"[]\n", b"\xff\n", b'{"ok": tr'):

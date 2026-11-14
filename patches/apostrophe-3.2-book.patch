@@ -60,7 +60,7 @@
  
      def on_text_changed(self, *_args):
          """called when the text changes, sets the self.did_change to true and
-@@ -338,12 +355,19 @@
+@@ -338,12 +355,24 @@
      def load_preview(self, *args):
          self.current.security_level = PreviewSecurity.UNRESTRICTED
  
@@ -73,6 +73,11 @@
          """
  
 -        self.reveal_headerbar_bottombar()
++        if self._before_load is not None:
++            # book panes: a file is loading, the buffer still holds the
++            # previous one, which was saved or given up before the load
++            LOGGER.info("not saving while a file loads")
++            return
 +        if not quiet:
 +            self.reveal_headerbar_bottombar()
 +        if self.current.gfile and self.saving:
@@ -82,7 +87,7 @@
          if self.current.gfile:
              LOGGER.info("saving")
  
-@@ -368,18 +392,21 @@
+@@ -368,18 +397,21 @@
                  LOGGER.warning(str(error.reason))
                  return
              else:
@@ -109,7 +114,16 @@
          # if there's no GFile we ask for one:
          else:
              self.save_document_as(callback=callback)
-@@ -432,7 +459,26 @@
+@@ -391,6 +423,8 @@
+ 
+         def on_response(dialog, response):
+             if response == Gtk.ResponseType.ACCEPT:
++                if self._before_load is not None:
++                    return  # book panes: see save_document
+ 
+                 file = dialog.get_file()
+ 
+@@ -432,7 +466,26 @@
  
          self.filechooser.show()
  
@@ -137,7 +151,7 @@
          try:
              success, _etag = gfile.replace_contents_finish(result)
          except GLib.GError as error:
-@@ -440,26 +486,45 @@
+@@ -440,26 +493,45 @@
              self.did_change = True
              self.progressbar_fade_out.play()
              self._set_file_monitor()
@@ -188,7 +202,7 @@
  
          return success
  
-@@ -515,11 +580,30 @@
+@@ -515,11 +587,30 @@
          """Open File from command line or open / open recent etc."""
          LOGGER.info("trying to open %s", file.get_uri())
  
@@ -220,7 +234,7 @@
          self._set_file_monitor()
  
      @Gtk.Template.Callback()
-@@ -528,38 +612,82 @@
+@@ -528,38 +619,83 @@
          self.load_file(self.current.gfile)
  
      def _set_file_monitor(self, *args, **kwargs):
@@ -250,24 +264,27 @@
  
 -    def _load_contents_cb(self, gfile, result, user_data=None):
 +    def _load_contents_cb(self, gfile, result, generation=None):
-+        # a newer load_file() superseded this one
-+        stale = (generation != self._load_generation
-+                 or not self.current.gfile
-+                 or not gfile.equal(self.current.gfile))
++        failure = None
          try:
              _success, contents, _etag = gfile.load_contents_finish(result)
          except GLib.GError as error:
-+            if stale:
-+                return
-+            self._load_failed()
-             helpers.show_error(self, str(error.message))
-             LOGGER.warning(str(error.message))
+-            helpers.show_error(self, str(error.message))
+-            LOGGER.warning(str(error.message))
++            failure = error
++        if generation != self._load_generation:
++            return  # a newer load_file() took over
++        if not self.current.gfile or not gfile.equal(self.current.gfile):
++            # the window turned to another document meanwhile (a new one)
++            self._before_load = None
++            self.textview.set_editable(True)
              return
-+        if stale:
-+            return
-+        if not self.show_contents(gfile, contents, _etag):
++        if failure is not None:
 +            self._load_failed()
- 
++            helpers.show_error(self, str(failure.message))
++            LOGGER.warning(str(failure.message))
++        elif not self.show_contents(gfile, contents, _etag):
++            self._load_failed()
++
 +    def _load_failed(self):
 +        """book panes: the buffer still holds the file shown before the
 +        load; make that the current file again."""
@@ -282,7 +299,7 @@
 +                self.current._gfile = previous
 +            self.preview_security_handler.set_file_security_level()
 +            self._set_file_monitor()
-+
+ 
 +    def show_contents(self, gfile, contents, _etag):
 +        """Put a file's bytes into the buffer; False when they are not text.
 +        book panes: split from _load_contents_cb, reloads call it directly."""
@@ -313,7 +330,7 @@
              self.textview.set_text(decoded)
              self.preview_security_handler.assert_security_risk(decoded)
              start_iter = self.textview.get_buffer().get_start_iter()
-@@ -575,6 +703,11 @@
+@@ -575,6 +711,11 @@
              self.update_headerbar_title()
  
              self.did_change = False
@@ -325,7 +342,7 @@
  
      def check_change(self,
                       callback = None):
-@@ -722,6 +855,10 @@
+@@ -722,6 +863,10 @@
              self.run_dispose()
              return False
  

@@ -28,7 +28,8 @@ from apostrophe.application import Application
 
 from book_panes import channel, folders, panes
 
-if os.environ.get("SMOKE_WATCH") == "0":  # as with the inotify limit reached
+WATCHING = os.environ.get("SMOKE_WATCH") != "0"
+if not WATCHING:  # as with the inotify limit reached
     folders.watch_folder = lambda gfile: None
 
 SCRATCH = os.path.abspath(os.environ["SMOKE_SCRATCH"])
@@ -314,11 +315,16 @@ def scenario(app):
     check(
         "load: no typing while a load is under way", not window.textview.get_editable()
     )
+    # the buffer still holds ch2: a save now must not put that into ch1
+    window.save_document()
+    window.save_document(quiet=True)
+    check("load: no save while a load is under way", not window.saving)
     yield 900
     del window.textview.set_text
     check(
         "load: of several loads only the newest is shown",
         shown == ["from agent\nmine\nmore\nlate\n"]
+        and read(CH1) == "from agent\nmine\nmore\nlate\n"
         and window.loaded_uri == ch1.get_uri()
         and window.textview.get_editable(),
     )
@@ -517,15 +523,27 @@ def scenario(app):
     subprocess.run(["import", "-window", "root", shot], check=False, timeout=30)
     check("screenshot written", os.path.exists(shot))
 
-    os.kill(book.child_pid, signal.SIGKILL)
-    yield 700
-    check(
-        "agent: its end is noticed",
-        book.child_pid is None and "session ended" in terminal_text(book),
-    )
-    book.restart()  # a start is under way when the window closes
-    append(window, "bye\n")
-    window.close()
+    if WATCHING:
+        # the window closes with unsaved text and an agent ignoring the hangup
+        book.command = "trap '' HUP; echo stubborn; exec cat"
+        book.restart()
+        yield 1500
+        STATE["pid"] = book.child_pid
+        append(window, "bye\n")
+        window.close()
+    else:
+        # the application quits with the window open while an agent starts
+        os.kill(book.child_pid, signal.SIGKILL)
+        yield 700
+        check(
+            "agent: its end is noticed",
+            book.child_pid is None and "session ended" in terminal_text(book),
+        )
+        append(window, "bye\n")
+        yield 1900
+        book.restart()
+        check("agent: a start is under way", book.spawning is not None)
+        app.quit()
     yield 3000
     check("close: window gone", False)  # reached only if the app is still up
     app.quit()
@@ -574,17 +592,10 @@ def main():
         and not os.path.exists(os.path.dirname(STATE["socket"])),
     )
     pid = STATE.get("pid")
-    alive = False
-    if pid:
-        for _attempt in range(20):
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except ProcessLookupError:
-                alive = False
-                break
-            GLib.usleep(100000)
-    check("close: agent process ended", pid is not None and not alive)
+    check(
+        "close: agent process ended",
+        isinstance(pid, int) and not panes.agent_runs(pid),
+    )
     left = processes_in(BOOK)
     for _attempt in range(20):
         if not left:

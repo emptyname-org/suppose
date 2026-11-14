@@ -33,21 +33,32 @@ def ask(request, path=None, timeout=TIMEOUT_SECONDS):
         raise ChannelError(f"not in the book editor's terminal ({SOCKET_ENV} unset)")
     end = time.monotonic() + timeout
     received = bytearray()
+
+    def wait(connection):
+        """Let the next step take what is left of the time, no more."""
+        left = end - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("timed out")
+        connection.settimeout(left)
+
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         try:
-            connection.settimeout(timeout)
+            wait(connection)
             connection.connect(path)
         except OSError as error:
             raise ChannelError(f"cannot reach the editor: {error}") from error
         try:
+            wait(connection)
             connection.sendall(json.dumps(request).encode("utf-8") + b"\n")
             while not received.endswith(b"\n"):
-                connection.settimeout(max(0.001, end - time.monotonic()))
+                wait(connection)
                 chunk = connection.recv(65536)
-                received += chunk
-                if not chunk or len(received) > MAX_REPLY_BYTES:
+                if not chunk:
                     break
-        except OSError as error:
+                received += chunk
+                if len(received) > MAX_REPLY_BYTES:
+                    raise OverflowError("answer too long")
+        except (OSError, OverflowError) as error:
             raise Unanswered(f"no answer from the editor: {error}") from error
     try:
         reply = json.loads(received.decode("utf-8"))

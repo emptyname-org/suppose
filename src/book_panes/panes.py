@@ -13,6 +13,7 @@ Environment:
 
 import os
 import signal
+import time
 
 import gi
 
@@ -38,7 +39,8 @@ DISK_POLL_SECONDS = 1
 TREE_POLL_SECONDS = 2
 BUSY_RETRY_MS = 100
 BUSY_RETRIES = 50
-KILL_AFTER_MS = 3000  # restart: an agent that ignores the hangup is killed
+KILL_AFTER_MS = 5000  # an agent that ignores the hangup is killed
+START_WAIT_SECONDS = 2.0  # shutdown: for agent starts under way to report
 TREE_WIDTH = 240
 EDITOR_MIN_WIDTH = 420
 AGENT_MIN_WIDTH = 320
@@ -146,6 +148,57 @@ def signal_agent(pid, signum):
     return False
 
 
+def agent_runs(pid):
+    """True while pid is a child of ours that has not exited. It is not
+    reaped here, so a pid that says True is never a reused one."""
+    try:
+        flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+        return os.waitid(os.P_PID, pid, flags) is None
+    except ChildProcessError:
+        return False
+
+
+OPEN_PANES = set()  # panes of windows not closed yet
+STARTING = set()  # panes with an agent start under way
+ENDING = {}  # agents hung up by closed windows: pid -> time.monotonic() to kill
+
+
+def end_agent(pid):
+    """Hang up an agent whose window is gone; it is killed when it stays."""
+    if signal_agent(pid, signal.SIGHUP):
+        ENDING[pid] = time.monotonic() + KILL_AFTER_MS / 1000
+        GLib.timeout_add(KILL_AFTER_MS, kill_ending, pid)
+
+
+def kill_ending(pid):
+    if ENDING.pop(pid, None) is not None and agent_runs(pid):
+        signal_agent(pid, signal.SIGKILL)
+    return GLib.SOURCE_REMOVE
+
+
+def on_shutdown(*_args):
+    """The application ends and the main loop with it: close what quitting
+    left open, give the agents hung up their time, kill those that stay."""
+    for panes in list(OPEN_PANES):
+        panes.close()
+    # a start under way reports its child through the main context
+    context = GLib.MainContext.default()
+    patience = time.monotonic() + START_WAIT_SECONDS
+    while STARTING and time.monotonic() < patience:
+        if not context.iteration(False):
+            time.sleep(0.01)
+    while ENDING:
+        now = time.monotonic()
+        for pid, deadline in list(ENDING.items()):
+            if not agent_runs(pid):
+                del ENDING[pid]
+            elif now >= deadline:
+                signal_agent(pid, signal.SIGKILL)
+                del ENDING[pid]
+        if ENDING:
+            time.sleep(0.05)
+
+
 def position(text_iter):
     return {"line": text_iter.get_line() + 1, "column": text_iter.get_line_offset() + 1}
 
@@ -188,6 +241,11 @@ class BookPanes:
         self._connect_editor()
         self.channel = self._open_channel()
         self._spawn()
+        OPEN_PANES.add(self)
+        application = window.get_application()
+        if application is not None and not getattr(application, "book_hooked", 0):
+            application.book_hooked = True
+            application.connect("shutdown", on_shutdown)
 
     # ---- layout -----------------------------------------------------------
 
@@ -405,7 +463,7 @@ class BookPanes:
     def _connect_editor(self):
         window = self.window
         window.textview.get_buffer().connect("changed", self._on_text_changed)
-        window.connect("destroy", self._on_destroy)
+        window.connect("destroy", self.close)
         # the file monitor can be late or unavailable; a stat a second is cheap
         self.disk_poll_timer = GLib.timeout_add_seconds(
             DISK_POLL_SECONDS, self._poll_disk
@@ -414,8 +472,12 @@ class BookPanes:
             TREE_POLL_SECONDS, self._poll_tree
         )
 
-    def _on_destroy(self, *_args):
+    def close(self, *_args):
+        """The window is gone, or the application quits with it open."""
+        if self.closed:
+            return
         self.closed = True
+        OPEN_PANES.discard(self)
         self.wanted = None
         for name in (
             "autosave_timer",
@@ -440,9 +502,9 @@ class BookPanes:
             self.style_handler = 0
         self.restart_pending = False
         if self.spawning is not None:
-            self.spawning.cancel()  # _on_spawned hangs up one that still starts
+            self.spawning.cancel()  # _on_spawned ends one that still starts
         if self.child_pid is not None:
-            signal_agent(self.child_pid, signal.SIGHUP)
+            end_agent(self.child_pid)
             self.child_pid = None
 
     def _buffer_matches_file(self):
@@ -700,6 +762,7 @@ class BookPanes:
         for name in removed:
             argv += ["-u", name]
         self.spawning = Gio.Cancellable()
+        STARTING.add(self)
         self.terminal.spawn_async(
             Vte.PtyFlags.DEFAULT,
             self.root.get_path(),
@@ -715,12 +778,13 @@ class BookPanes:
 
     def _on_spawned(self, _terminal, pid, error, *_args):
         self.spawning = None
+        STARTING.discard(self)
         if error is not None or pid == -1:
             if not self.closed:
                 message = error.message if error is not None else "spawn failed"
                 self._notice("could not start the agent: " + message)
         elif self.closed:
-            signal_agent(pid, signal.SIGHUP)  # the window went away meanwhile
+            end_agent(pid)  # the window went away meanwhile
         else:
             self.child_pid = pid
 
@@ -757,7 +821,7 @@ class BookPanes:
 
     def _on_kill_timer(self, pid):
         self.kill_timer = 0
-        if self.child_pid == pid:  # exit not reported: the pid is still ours
+        if self.child_pid == pid and agent_runs(pid):
             signal_agent(pid, signal.SIGKILL)
         return GLib.SOURCE_REMOVE
 

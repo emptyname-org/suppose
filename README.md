@@ -23,7 +23,7 @@ agent's terminal on the right.
 
 ## Build
 
-Debian 13, amd64. `make build` downloads Apostrophe and the libraries pinned in
+Debian 13 (Python 3.13), amd64. `make build` downloads Apostrophe and the libraries pinned in
 `packages.lock` from Debian, verifies their checksums, applies
 `patches/apostrophe-3.2-book.patch` and puts the application into
 `dist/book-editor`. Nothing is installed into the system.
@@ -33,8 +33,7 @@ Needed on the host:
     sudo apt install make python3 python3-venv curl ca-certificates dpkg patch \
         libglib2.0-bin python3-gi python3-cairo python3-gi-cairo \
         python3-chardet gir1.2-adw-1 gir1.2-gtk-4.0 gir1.2-webkit-6.0 \
-        gsettings-desktop-schemas dconf-gsettings-backend pandoc \
-        libvte-2.91-common
+        gsettings-desktop-schemas dconf-gsettings-backend pandoc
 
 and for the tests:
 
@@ -43,11 +42,15 @@ and for the tests:
 Commands:
 
     make build    # dist/book-editor
-    make test     # unit tests, then the built editor on a hidden display;
-                  # at least 85 % coverage of src/book_panes
+    make test     # unit tests, then the built editor on a hidden display, with
+                  # and without folder watching; statements and branches of
+                  # src/book_panes are covered to at least 85 %
     make lint     # ruff, mypy, shellcheck and an advisory check of the pinned
                   # packages (needs the network)
-    make clean
+    make clean    # removes dist/book-editor; tools and downloads stay
+
+`make test` needs a checkout path of at most 51 bytes: the editor's socket
+lives below it during the tests, and a socket path is short.
 
 ## Run
 

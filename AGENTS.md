@@ -1,9 +1,10 @@
 # book-editor guidance
 
 - `make build` puts the application into `dist/book-editor`. `make test` runs
-  the unit tests and the built editor on a hidden display, with at least 85 %
-  coverage of `src/book_panes`. `make lint` runs ruff, mypy, shellcheck and the
-  advisory check of the pinned packages (needs the network). `make clean`.
+  the unit tests and the built editor on a hidden display, with and without
+  folder watching; statements and branches of `src/book_panes` are covered to
+  at least 85 %. `make lint` runs ruff, mypy, shellcheck and the advisory check
+  of the pinned packages (needs the network). `make clean` removes the build.
 - `src/book_panes/`: panes, folders, channel (editor side), client (agent
   side). `src/bin/`: launcher and agent tools. `tests/` mirrors `src/`;
   `tests/smoke/` drives the built editor. `tools/`: build and audit.
