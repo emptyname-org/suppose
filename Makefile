@@ -1,16 +1,20 @@
 SHELL := /bin/sh
 ROOT := $(CURDIR)
+VERSION := $(strip $(file <VERSION))
 export TMPDIR := $(ROOT)/tmp
 export PIP_CACHE_DIR := $(ROOT)/tmp/pip
 export PYTHONDONTWRITEBYTECODE := 1
 .NOTPARALLEL:
-.PHONY: build deb test lint audit dev clean
+.PHONY: build deb install test lint audit dev clean
 
 build:
 	/usr/bin/python3 tools/build.py
 
 deb: build
 	/usr/bin/python3 tools/deb.py
+
+install: deb
+	sudo apt-get install --reinstall ./dist/book-editor_$(VERSION)_amd64.deb
 
 dev: .venv/.tools_ready
 
