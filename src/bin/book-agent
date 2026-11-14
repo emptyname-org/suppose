@@ -13,6 +13,7 @@ import glob
 import hashlib
 import os
 import sys
+import time
 import uuid
 
 PROMPT = (
@@ -24,6 +25,7 @@ PROMPT = (
     "undoable in the editor (see `book-edit --help`). For the open file use "
     "these rather than the file on disk; edit other files on disk as usual."
 )
+LOCK_SECONDS = 2.0  # the lock is held for an instant; longer means a stuck holder
 
 
 def folder_state():
@@ -50,9 +52,17 @@ def process_runs(pid):
 
 def claim(state):
     """Record this process as the user of the folder's conversation. False
-    when another running agent holds it."""
+    when another running agent holds it, or the state stays locked."""
     with open(os.path.join(state, "lock"), "w") as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
+        end = time.monotonic() + LOCK_SECONDS
+        while True:
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > end:
+                    return False
+                time.sleep(0.05)
         path = os.path.join(state, "pid")
         try:
             with open(path, encoding="ascii") as source:

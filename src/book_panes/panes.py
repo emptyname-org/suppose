@@ -38,6 +38,7 @@ DISK_POLL_SECONDS = 1
 TREE_POLL_SECONDS = 2
 BUSY_RETRY_MS = 100
 BUSY_RETRIES = 50
+KILL_AFTER_MS = 3000  # restart: an agent that ignores the hangup is killed
 TREE_WIDTH = 240
 EDITOR_MIN_WIDTH = 420
 AGENT_MIN_WIDTH = 320
@@ -133,6 +134,18 @@ def agent_environment(environ, socket_path):
     return changed, removed
 
 
+def signal_agent(pid, signum):
+    """Signal the agent's process group, or the agent alone when it has left
+    the group. False when there is nothing to signal."""
+    for send in (os.killpg, os.kill):
+        try:
+            send(pid, signum)
+        except (ProcessLookupError, PermissionError):
+            continue
+        return True
+    return False
+
+
 def position(text_iter):
     return {"line": text_iter.get_line() + 1, "column": text_iter.get_line_offset() + 1}
 
@@ -155,8 +168,12 @@ class BookPanes:
             os.path.abspath(os.environ.get("BOOK_ROOT") or os.getcwd())
         )
         self.command = os.environ.get("BOOK_AGENT_CMD") or "claude"
-        self.child_pid = None
-        self.restart_pending = False
+        self.child_pid = None  # the running agent
+        self.spawning = None  # cancellable of a start under way
+        self.restart_pending = False  # the agent was told to go, start anew
+        self.kill_timer = 0
+        self.closed = False
+        self.wanted = None  # file asked for, shown once edits are saved
         self.autosave_timer = 0
         self.sync_timer = 0
         self.disk_poll_timer = 0
@@ -337,12 +354,11 @@ class BookPanes:
         return self._folder_model(info.get_attribute_object("standard::file"))
 
     def _poll_tree(self):
-        """Catches what folder watching misses, or all of it without watching."""
-        root = self.root.get_uri()
-        for uri, listing in list(self.listings.items()):
-            if not listing.poll() and uri != root:
-                listing.close()  # folder is gone
-                del self.listings[uri]
+        """Catches what folder watching misses, or all of it without watching.
+        Listings stay for the life of the window: one per folder ever shown,
+        so that a folder which comes back is followed again."""
+        for listing in self.listings.values():
+            listing.poll()
         return GLib.SOURCE_CONTINUE
 
     def _setup_row(self, _factory, item):
@@ -399,11 +415,14 @@ class BookPanes:
         )
 
     def _on_destroy(self, *_args):
+        self.closed = True
+        self.wanted = None
         for name in (
             "autosave_timer",
             "sync_timer",
             "disk_poll_timer",
             "tree_poll_timer",
+            "kill_timer",
         ):
             timer = getattr(self, name)
             if timer:
@@ -420,11 +439,10 @@ class BookPanes:
             self.style.disconnect(self.style_handler)
             self.style_handler = 0
         self.restart_pending = False
+        if self.spawning is not None:
+            self.spawning.cancel()  # _on_spawned hangs up one that still starts
         if self.child_pid is not None:
-            try:
-                os.killpg(self.child_pid, signal.SIGHUP)
-            except (ProcessLookupError, PermissionError):
-                pass
+            signal_agent(self.child_pid, signal.SIGHUP)
             self.child_pid = None
 
     def _buffer_matches_file(self):
@@ -432,35 +450,44 @@ class BookPanes:
         gfile = window.current.gfile
         return gfile is not None and window.loaded_uri == gfile.get_uri()
 
-    def open_file(self, gfile, attempt=0):
-        """Show gfile in the editor; edits of the current file are saved first."""
+    def open_file(self, gfile):
+        """Show gfile in the editor; edits of the current file are saved
+        first. The latest request wins."""
+        self.wanted = gfile
+        self._open(gfile, 0)
+
+    def _open(self, gfile, attempt):
+        if self.wanted is not gfile:
+            return GLib.SOURCE_REMOVE  # a later request took over
         window = self.window
         current = window.current.gfile
         if current is not None and current.equal(gfile):
+            self.wanted = None
             window.textview.grab_focus()
-            return
-        if window.saving:
+        elif window.saving:
             # let the save in flight finish, give up rather than wait forever
             if attempt < BUSY_RETRIES:
-                GLib.timeout_add(BUSY_RETRY_MS, self._retry_open, gfile, attempt + 1)
-            return
-
-        def load(win):
-            win.load_file(gfile)
-            win.textview.grab_focus()
-
-        if (
+                GLib.timeout_add(BUSY_RETRY_MS, self._open, gfile, attempt + 1)
+            else:
+                self.wanted = None
+        elif (
             window.did_change
             and self._buffer_matches_file()
             and not window.disk_conflict
         ):
-            window.save_document(callback=load, quiet=True)
+            # then look again: text typed during the save is saved as well
+            window.save_document(
+                callback=lambda _window: self._open(gfile, 0), quiet=True
+            )
         else:
-            window.check_change(load)
-
-    def _retry_open(self, gfile, attempt):
-        self.open_file(gfile, attempt)
+            window.check_change(lambda _window: self._load(gfile))
         return GLib.SOURCE_REMOVE
+
+    def _load(self, gfile):
+        if self.wanted is gfile:
+            self.wanted = None
+            self.window.load_file(gfile)
+            self.window.textview.grab_focus()
 
     def _on_text_changed(self, *_args):
         if self.autosave_timer:
@@ -549,19 +576,22 @@ class BookPanes:
         adjustment = window.editor.scrolledwindow.get_vadjustment()
         scroll = adjustment.get_value()
 
-        def restore_view():
-            def place():
-                end = buffer.get_char_count()
-                buffer.place_cursor(buffer.get_iter_at_offset(min(offset, end)))
-                limit = adjustment.get_upper() - adjustment.get_page_size()
-                adjustment.set_value(max(0, min(scroll, limit)))
-                return GLib.SOURCE_REMOVE
+        def place():
+            end = buffer.get_char_count()
+            buffer.place_cursor(buffer.get_iter_at_offset(min(offset, end)))
+            limit = adjustment.get_upper() - adjustment.get_page_size()
+            adjustment.set_value(max(0, min(scroll, limit)))
+            return GLib.SOURCE_REMOVE
 
+        # at once, with the bytes just read: no moment in which typed text
+        # could be lost to a load still under way
+        if window.show_contents(gfile, data, etag):
             window.discard_infobar.set_revealed(False)
             GLib.idle_add(place)
-
-        window.load_file(gfile)
-        window.after_load = restore_view
+        else:
+            # no longer text: keep the editor's version, the writer decides
+            window.disk_conflict = True
+            window.discard_infobar.set_revealed(True)
         return GLib.SOURCE_REMOVE
 
     def save_before_close(self):
@@ -661,12 +691,15 @@ class BookPanes:
     # ---- agent ------------------------------------------------------------
 
     def _spawn(self):
+        if self.spawning is not None or self.closed:
+            return
         # the terminal adds its variables to ours; unsetting takes env -u
         socket_path = self.channel.path if self.channel is not None else None
         changed, removed = agent_environment(os.environ, socket_path)
         argv = ["/usr/bin/env"]
         for name in removed:
             argv += ["-u", name]
+        self.spawning = Gio.Cancellable()
         self.terminal.spawn_async(
             Vte.PtyFlags.DEFAULT,
             self.root.get_path(),
@@ -676,20 +709,28 @@ class BookPanes:
             None,
             None,
             -1,
-            None,
+            self.spawning,
             self._on_spawned,
         )
 
     def _on_spawned(self, _terminal, pid, error, *_args):
+        self.spawning = None
         if error is not None or pid == -1:
-            message = error.message if error is not None else "spawn failed"
-            self._notice("could not start the agent: " + message)
-            self.child_pid = None
-            return
-        self.child_pid = pid
+            if not self.closed:
+                message = error.message if error is not None else "spawn failed"
+                self._notice("could not start the agent: " + message)
+        elif self.closed:
+            signal_agent(pid, signal.SIGHUP)  # the window went away meanwhile
+        else:
+            self.child_pid = pid
 
     def _on_child_exited(self, _terminal, _status):
         self.child_pid = None
+        if self.kill_timer:
+            GLib.source_remove(self.kill_timer)
+            self.kill_timer = 0
+        if self.closed:
+            return
         if self.restart_pending:
             self.restart_pending = False
             self.terminal.reset(True, True)
@@ -701,19 +742,24 @@ class BookPanes:
         self.terminal.feed(("\r\n\x1b[2m[" + text + "]\x1b[0m\r\n").encode())
 
     def restart(self):
-        if self.child_pid is None:
-            self.terminal.reset(True, True)
-            self._spawn()
-            return
-        self.restart_pending = True
-        try:
-            os.killpg(self.child_pid, signal.SIGHUP)
-        except (ProcessLookupError, PermissionError):
-            # already gone; child-exited will not come for a pid we lost
-            self.restart_pending = False
-            self.child_pid = None
-            self.terminal.reset(True, True)
-            self._spawn()
+        if self.spawning is not None or self.restart_pending:
+            return  # a new agent is on its way
+        if self.child_pid is not None:
+            if signal_agent(self.child_pid, signal.SIGHUP):
+                self.restart_pending = True  # started when this one has exited
+                self.kill_timer = GLib.timeout_add(
+                    KILL_AFTER_MS, self._on_kill_timer, self.child_pid
+                )
+                return
+            self.child_pid = None  # gone already, no exit will be reported
+        self.terminal.reset(True, True)
+        self._spawn()
+
+    def _on_kill_timer(self, pid):
+        self.kill_timer = 0
+        if self.child_pid == pid:  # exit not reported: the pid is still ours
+            signal_agent(pid, signal.SIGKILL)
+        return GLib.SOURCE_REMOVE
 
     def send_context(self):
         """Paste a reference to the open file and the selection to the agent."""

@@ -7,6 +7,7 @@ Exits 0 when every check passes.
 
 import json
 import os
+import signal
 import subprocess
 import sys
 
@@ -22,6 +23,7 @@ Gio.Resource._register(
     Gio.resource_load(os.path.join(config.PKGDATA_DIR, "apostrophe.gresource"))
 )
 
+from apostrophe import helpers  # after the resources: it loads widgets
 from apostrophe.application import Application
 
 from book_panes import channel, folders, panes
@@ -75,6 +77,27 @@ def terminal_is_light(book):
 def append(window, text):
     buffer = window.textview.get_buffer()
     buffer.insert(buffer.get_end_iter(), text)
+
+
+def runs(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def processes_in(folder):
+    """Pids of the processes whose working directory is the folder."""
+    found = []
+    for name in os.listdir("/proc"):
+        if name.isdigit():
+            try:
+                if os.readlink(f"/proc/{name}/cwd") == folder:
+                    found.append(int(name))
+            except OSError:
+                pass  # gone meanwhile, or not ours
+    return found
 
 
 def start_tool(book, *argv, stdin=None):
@@ -244,12 +267,99 @@ def scenario(app):
 
     append(window, "more\n")
     book.open_file(ch2)
-    yield 1200
+    append(window, "late\n")  # typed while the save before the switch runs
+    check("switch: waits for the save", window.saving and book.wanted is ch2)
+    yield 1500
     check(
-        "switch: previous file saved, next one shown",
-        read(CH1) == "from agent\nmine\nmore\n"
+        "switch: previous file saved with the text typed meanwhile, next shown",
+        read(CH1) == "from agent\nmine\nmore\nlate\n"
         and window.textview.get_text() == CH2_TEXT
         and window.loaded_uri == ch2.get_uri(),
+    )
+
+    # P1-2: a save asked for while a write is in flight waits its turn
+    append(window, "one\n")
+    book.flush()
+    append(window, "two\n")
+    saved = []
+    window.save_document(callback=lambda _window: saved.append(read(CH2)))
+    check(
+        "save: a second save waits for the write in flight",
+        window.saving and len(window._queued_saves) == 1,
+    )
+    yield 1200
+    check(
+        "save: both writes done in turn, state matches the disk",
+        saved == [CH2_TEXT + "one\ntwo\n"]
+        and read(CH2) == CH2_TEXT + "one\ntwo\n"
+        and not window.did_change
+        and not window.saving
+        and window.base_bytes == (CH2_TEXT + "one\ntwo\n").encode(),
+    )
+    write(CH2, CH2_TEXT)  # as the agent would: back to the start
+    yield 2600
+    check(
+        "save: disk change after queued saves still reloads",
+        window.textview.get_text() == CH2_TEXT and not window.did_change,
+    )
+
+    # P1-3: only the newest load counts, and nothing is typed into a text
+    # that is about to be replaced
+    shown = []
+    set_text = window.textview.set_text
+    window.textview.set_text = lambda text: (shown.append(text), set_text(text))[1]
+    window.load_file(ch1)
+    window.load_file(ch2)
+    window.load_file(ch1)
+    check(
+        "load: no typing while a load is under way", not window.textview.get_editable()
+    )
+    yield 900
+    del window.textview.set_text
+    check(
+        "load: of several loads only the newest is shown",
+        shown == ["from agent\nmine\nmore\nlate\n"]
+        and window.loaded_uri == ch1.get_uri()
+        and window.textview.get_editable(),
+    )
+    errors = []
+    show_error = helpers.show_error
+    helpers.show_error = lambda _parent, message: errors.append(message)
+    before = "from agent\nmine\nmore\nlate\n"
+    window.load_file(Gio.File.new_for_path(os.path.join(BOOK, "missing.md")))
+    check(
+        "load: a missing file changes nothing",
+        len(errors) == 1
+        and window.current.gfile.equal(ch1)
+        and window.loaded_uri == ch1.get_uri()
+        and window.textview.get_editable(),
+    )
+    locked = os.path.join(BOOK, "locked.md")
+    write(locked, "unreadable\n")
+    os.chmod(locked, 0)
+    window.load_file(Gio.File.new_for_path(locked))
+    yield 900
+    helpers.show_error = show_error
+    os.remove(locked)
+    check(
+        "load: after a failed load the previous file is current again",
+        len(errors) == 2
+        and window.current.gfile.equal(ch1)
+        and window.loaded_uri == ch1.get_uri()
+        and window.textview.get_editable()
+        and window.textview.get_text() == before,
+    )
+    append(window, "kept\n")
+    yield 1900
+    check(
+        "load: and its edits are saved to it",
+        read(CH1) == "from agent\nmine\nmore\nlate\nkept\n" and not window.did_change,
+    )
+    book.open_file(ch2)
+    yield 1200
+    check(
+        "load: next file shown",
+        window.loaded_uri == ch2.get_uri() and window.textview.get_text() == CH2_TEXT,
     )
 
     buffer = window.textview.get_buffer()
@@ -354,16 +464,48 @@ def scenario(app):
         and [app.get_accels_for_action(name) for name in names] == before,
     )
 
+    spawned = []
+    on_spawned = book._on_spawned
+
+    def record(terminal, pid, error, *rest):
+        spawned.append(pid)
+        return on_spawned(terminal, pid, error, *rest)
+
+    book._on_spawned = record
     first_pid = book.child_pid
     book.restart()
+    book.restart()  # asked twice: the second finds one on its way
     yield 1800
     check(
-        "restart: new agent process",
-        book.child_pid is not None and book.child_pid != first_pid,
+        "restart: asked twice, one new agent process",
+        spawned == [book.child_pid]
+        and book.child_pid not in (None, first_pid)
+        and not runs(first_pid),
     )
     check(
         "restart: the new agent sees the open file",
         "file: part/ch2.md" in terminal_text(book),
+    )
+
+    command = book.command
+    book.command = "trap '' HUP; echo stubborn; exec cat"
+    book.restart()
+    yield 1500
+    stubborn = book.child_pid
+    panes.KILL_AFTER_MS = 500
+    book.command = command
+    book.restart()
+    yield 300
+    check(
+        "restart: an agent ignoring the hangup is still there at first",
+        book.child_pid == stubborn and "stubborn" in terminal_text(book),
+    )
+    yield 1900
+    check(
+        "restart: then it is killed and replaced",
+        book.child_pid not in (None, stubborn)
+        and not runs(stubborn)
+        and len(spawned) == 3,
     )
     STATE["pid"] = book.child_pid
 
@@ -375,6 +517,13 @@ def scenario(app):
     subprocess.run(["import", "-window", "root", shot], check=False, timeout=30)
     check("screenshot written", os.path.exists(shot))
 
+    os.kill(book.child_pid, signal.SIGKILL)
+    yield 700
+    check(
+        "agent: its end is noticed",
+        book.child_pid is None and "session ended" in terminal_text(book),
+    )
+    book.restart()  # a start is under way when the window closes
     append(window, "bye\n")
     window.close()
     yield 3000
@@ -411,7 +560,7 @@ def main():
     app.set_flags(app.get_flags() | Gio.ApplicationFlags.NON_UNIQUE)
     app.connect_after("activate", drive)
     GLib.timeout_add_seconds(
-        120, lambda: (check("finished in time", False), app.quit())
+        140, lambda: (check("finished in time", False), app.quit())
     )
     app.run([])
 
@@ -436,6 +585,13 @@ def main():
                 break
             GLib.usleep(100000)
     check("close: agent process ended", pid is not None and not alive)
+    left = processes_in(BOOK)
+    for _attempt in range(20):
+        if not left:
+            break
+        GLib.usleep(100000)
+        left = processes_in(BOOK)
+    check("close: no process left in the book folder", not left)
     print(f"{len(FAILED)} failed")
     return 1 if FAILED else 0
 

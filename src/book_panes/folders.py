@@ -93,29 +93,36 @@ class FolderListing:
         return GLib.SOURCE_REMOVE
 
     def refresh(self):
-        """Re-read the folder. Returns False when it cannot be read."""
-        self.stamp = modified_stamp(self.gfile)  # before reading: never ahead
+        """Re-read the folder. False when it cannot be read: the entries stay
+        as they are and the next poll reads again."""
+        stamp = modified_stamp(self.gfile)  # before reading: never ahead
         entries = visible_entries(self.gfile)
-        found = entries or {}
+        if entries is None:
+            self.stamp = None  # equal to no stamp of a folder
+            return False
+        self.stamp = stamp
         store = self.store
         index = 0
         while index < store.get_n_items():
             old = store.get_item(index)
-            new = found.get(old.get_name())
+            new = entries.get(old.get_name())
             if new is None or new.get_file_type() != old.get_file_type():
                 store.remove(index)
             else:
-                del found[old.get_name()]
+                del entries[old.get_name()]
                 index += 1
-        for info in found.values():
+        for info in entries.values():
             store.append(info)
-        return entries is not None
+        return True
 
     def poll(self):
-        """Refresh when the folder changed. Returns False when it is gone."""
-        if modified_stamp(self.gfile) != self.stamp:
-            return self.refresh()
-        return self.stamp is not None
+        """Refresh when the folder changed; empty while the folder is gone."""
+        stamp = modified_stamp(self.gfile)
+        if stamp is None:
+            self.stamp = None
+            self.store.remove_all()
+        elif stamp != self.stamp:
+            self.refresh()
 
     def close(self):
         if self.timer:

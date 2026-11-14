@@ -5,7 +5,10 @@ import io
 import json
 import os
 import shutil
+import socket
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -139,6 +142,85 @@ class EditTest(ClientCase):
         )
 
 
+class BrokenEditorTest(unittest.TestCase):
+    """The tools against an endpoint that does not answer as the editor does."""
+
+    def setUp(self):
+        os.makedirs(TMP, exist_ok=True)
+        base = tempfile.mkdtemp(prefix="br.", dir=TMP)
+        self.addCleanup(shutil.rmtree, base, True)
+        self.path = os.path.join(base, "socket")
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(self.listener.close)
+        self.listener.bind(self.path)
+        self.listener.listen(1)
+        self.stop = threading.Event()
+        self.addCleanup(self.stop.set)
+
+    def serve(self, behave):
+        def work():
+            connection, _address = self.listener.accept()
+            with connection:
+                connection.recv(65536)
+                try:
+                    behave(connection)
+                except OSError:
+                    pass  # the client gave up
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def trickle(self, connection):
+        while not self.stop.wait(0.05):
+            connection.sendall(b"x")
+
+    def test_answer_that_trickles_forever_ends_at_the_deadline(self):
+        self.serve(self.trickle)
+        start = time.monotonic()
+        with self.assertRaises(client.Unanswered):
+            client.ask({"op": "view"}, self.path, timeout=0.4)
+        self.assertLess(time.monotonic() - start, 2)
+
+    def test_silent_editor_ends_at_the_deadline(self):
+        self.serve(lambda connection: self.stop.wait(5))
+        with self.assertRaises(client.Unanswered):
+            client.ask({"op": "view"}, self.path, timeout=0.3)
+
+    def test_endless_answer_is_cut_off(self):
+        self.serve(lambda connection: connection.sendall(b"x" * 100000))
+        with (
+            mock.patch.object(client, "MAX_REPLY_BYTES", 1000),
+            self.assertRaises(client.Unanswered),
+        ):
+            client.ask({"op": "view"}, self.path, timeout=5)
+
+    def test_answers_that_are_not_replies_count_as_none(self):
+        for answer in (b"", b"[]\n", b"\xff\n", b'{"ok": tr'):
+            self.serve(lambda connection, answer=answer: connection.sendall(answer))
+            with self.assertRaises(client.Unanswered):
+                client.ask({"op": "view"}, self.path, timeout=5)
+
+    def run_tool(self, tool, *argv):
+        err = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {client.SOCKET_ENV: self.path}),
+            contextlib.redirect_stderr(err),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            return client.main(tool, list(argv)), err.getvalue()
+
+    def test_edit_without_answer_says_its_outcome_is_unknown(self):
+        self.serve(lambda connection: None)
+        status, err = self.run_tool("edit", "insert", "x")
+        self.assertEqual(status, client.UNANSWERED)
+        self.assertIn("The edit may have been made; check with book-view.", err)
+
+    def test_view_without_answer_has_the_same_status_and_no_edit_hint(self):
+        self.serve(lambda connection: None)
+        status, err = self.run_tool("view")
+        self.assertEqual(status, client.UNANSWERED)
+        self.assertNotIn("The edit may", err)
+
+
 class ConnectionTest(unittest.TestCase):
     def test_outside_the_editor_the_tools_say_so(self):
         err = io.StringIO()
@@ -149,8 +231,13 @@ class ConnectionTest(unittest.TestCase):
 
     def test_a_vanished_editor_is_reported(self):
         gone = os.path.join(TMP, "no-such-socket")
-        with self.assertRaisesRegex(client.ChannelError, "no answer from the editor"):
+        with self.assertRaisesRegex(
+            client.ChannelError, "cannot reach the editor"
+        ) as failed:
             client.ask({"op": "view"}, gone)
+        self.assertNotIsInstance(
+            failed.exception, client.Unanswered
+        )  # nothing was sent
 
     def test_usage_errors_exit_with_status_two(self):
         with (

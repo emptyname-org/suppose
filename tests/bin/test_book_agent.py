@@ -1,10 +1,12 @@
 """book-agent: which conversation the pane's Claude continues."""
 
+import fcntl
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 
@@ -105,6 +107,18 @@ class BookAgentTest(unittest.TestCase):
         owner = os.path.join(self.state, "book-editor", "sessions", folder, "pid")
         with open(owner) as source:
             self.assertEqual(int(source.read()), pid)
+
+    def test_locked_state_gives_a_separate_conversation_without_hanging(self):
+        _pid, first = self.start()
+        self.save_transcript(first[1])
+        (folder,) = os.listdir(os.path.join(self.state, "book-editor", "sessions"))
+        lock = os.path.join(self.state, "book-editor", "sessions", folder, "lock")
+        with open(lock, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)  # a holder that never lets go
+            start = time.monotonic()
+            self.assertEqual(self.start()[1], [])
+            self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual(self.start()[1], ["--resume", first[1]])
 
     def test_damaged_state_starts_a_new_conversation(self):
         self.start()

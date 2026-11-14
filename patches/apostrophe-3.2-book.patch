@@ -29,26 +29,27 @@
  VERSION = "3.2"
 --- a/lib/python3/dist-packages/apostrophe/main_window.py
 +++ b/lib/python3/dist-packages/apostrophe/main_window.py
-@@ -92,6 +92,18 @@
+@@ -92,6 +92,19 @@
  
          self.current = File()
  
-+        # book panes: uri whose content is in the buffer, save in flight,
-+        # one-shot hook run after the next successful load, etag of the
-+        # disk version the buffer is based on, unresolved disk conflict
++        # book panes: uri whose content is in the buffer, etag and bytes of
++        # the disk version the buffer is based on, unresolved disk conflict
 +        self.loaded_uri = None
-+        self.saving = False
-+        self.after_load = None
 +        self.disk_etag = None
 +        self.base_bytes = None
 +        self.disk_conflict = False
-+        self._saving_quiet = False
-+        self._saving_bytes = None
++        # one write at a time: write in flight, saves asked for meanwhile
++        self.saving = False
++        self._queued_saves = []
++        # the newest load wins; a failed one restores the file shown before
++        self._load_generation = 0
++        self._before_load = None
 +
          # Setup text editor
          self.textview = self.editor.textview
          self.textview.get_buffer().connect('changed', self.on_text_changed)
-@@ -291,6 +303,10 @@
+@@ -291,6 +304,10 @@
          if self.get_application()._application_id == 'org.gnome.gitlab.somas.Apostrophe.Devel':
              self.add_css_class('devel')
  
@@ -59,7 +60,7 @@
  
      def on_text_changed(self, *_args):
          """called when the text changes, sets the self.did_change to true and
-@@ -338,12 +354,15 @@
+@@ -338,12 +355,19 @@
      def load_preview(self, *args):
          self.current.security_level = PreviewSecurity.UNRESTRICTED
  
@@ -74,25 +75,26 @@
 -        self.reveal_headerbar_bottombar()
 +        if not quiet:
 +            self.reveal_headerbar_bottombar()
++        if self.current.gfile and self.saving:
++            # starts when the write in flight is done, with the text of then
++            self._queued_saves.append((callback, quiet))
++            return
          if self.current.gfile:
              LOGGER.info("saving")
  
-@@ -368,13 +387,18 @@
+@@ -368,18 +392,21 @@
                  LOGGER.warning(str(error.reason))
                  return
              else:
 -                self.save_progressbar.set_opacity(1)
 -                self.save_progressbar.set_visible(True)
 -                self.progressbar_animation.play()
--
 +                if not quiet:
 +                    self.save_progressbar.set_opacity(1)
 +                    self.save_progressbar.set_visible(True)
 +                    self.progressbar_animation.play()
-+
+ 
 +                self.saving = True
-+                self._saving_bytes = encoded_text
-+                self._saving_quiet = quiet
 +                # autosave never overwrites a version it has not seen
                  self.current.gfile.replace_contents_bytes_async(
                      GLib.Bytes.new(encoded_text),
@@ -101,60 +103,124 @@
                      make_backup=False,
                      flags=Gio.FileCreateFlags.NONE,
                      cancellable=None,
-@@ -433,6 +457,7 @@
+                     callback=self._replace_contents_cb,
+-                    user_data=callback)
++                    user_data=(callback, encoded_text, quiet))
+         # if there's no GFile we ask for one:
+         else:
+             self.save_document_as(callback=callback)
+@@ -432,7 +459,26 @@
+ 
          self.filechooser.show()
  
-     def _replace_contents_cb(self, gfile, result, callback=None):
+-    def _replace_contents_cb(self, gfile, result, callback=None):
++    def _next_save(self, callback=None):
++        """book panes: start the save asked for while a write was in flight.
++        True when one was started; callback then runs after it."""
++        queued, self._queued_saves = self._queued_saves, []
++        if not queued or not self.current.gfile:
++            return False
++        callbacks = [callback] + [asked for asked, _quiet in queued]
++        callbacks = [asked for asked in callbacks if asked is not None]
++
++        def after(window):
++            for asked in callbacks:
++                asked(window)
++
++        self.save_document(callback=after if callbacks else None,
++                           quiet=all(quiet for _asked, quiet in queued))
++        return True
++
++    def _replace_contents_cb(self, gfile, result, operation):
++        callback, saved_bytes, quiet = operation
 +        self.saving = False
          try:
              success, _etag = gfile.replace_contents_finish(result)
          except GLib.GError as error:
-@@ -440,6 +465,11 @@
+@@ -440,26 +486,45 @@
              self.did_change = True
              self.progressbar_fade_out.play()
              self._set_file_monitor()
-+            if self._saving_quiet and error.matches(
+-            helpers.show_error(self, str(error.message))
++            if quiet and error.matches(
 +                    Gio.io_error_quark(), Gio.IOErrorEnum.WRONG_ETAG):
 +                # changed on disk under unsaved edits: reload or ask
 +                self.book.sync_with_disk()
-+                return False
-             helpers.show_error(self, str(error.message))
++            else:
++                helpers.show_error(self, str(error.message))
++            self._next_save()
              return False
  
-@@ -447,8 +477,19 @@
+         if success:
              if self.progressbar_animation.get_state() == Adw.AnimationState.PAUSED:
                  self.progressbar_animation.resume()
  
 -            self.update_headerbar_title()
 -            self.did_change = False
-+            # text typed while the save was in flight is still unsaved
-+            try:
-+                current_bytes = self.textview.get_text()\
-+                    .encode(self.current.encoding)
-+            except UnicodeEncodeError:
-+                current_bytes = None
-+            self.did_change = current_bytes != self._saving_bytes
++            # the window may show another file by now
 +            if self.current.gfile and self.current.gfile.equal(gfile):
++                # text typed while the save was in flight is still unsaved
++                try:
++                    current_bytes = self.textview.get_text()\
++                        .encode(self.current.encoding)
++                except UnicodeEncodeError:
++                    current_bytes = None
++                self.did_change = current_bytes != saved_bytes
 +                self.loaded_uri = gfile.get_uri()
 +                self.disk_etag = _etag
-+                self.base_bytes = self._saving_bytes
++                self.base_bytes = saved_bytes
 +                self.disk_conflict = False
-+            self.update_headerbar_title(self.did_change)
++                self.update_headerbar_title(self.did_change)
              # We add a 1ms delay to the call to avoid race conditions
              # see #456
              GLib.timeout_add(500, self._set_file_monitor, None, 0)
-@@ -516,6 +557,10 @@
+             recents_manager = Gtk.RecentManager.get_default()
+-            recents_manager.add_item(self.current.gfile.get_uri())
+-            if callback is not None:
++            recents_manager.add_item(gfile.get_uri())
++            if not self._next_save(callback) and callback is not None:
+                 callback(self)
+         else:
+             self.progressbar_fade_out.play()
+             self.did_change = True
+             self._set_file_monitor()
++            self._next_save()
+ 
+         return success
+ 
+@@ -515,11 +580,30 @@
+         """Open File from command line or open / open recent etc."""
          LOGGER.info("trying to open %s", file.get_uri())
  
++        # book panes: a file that cannot be examined changes nothing
++        try:
++            file.query_info("standard", Gio.FileQueryInfoFlags.NONE, None)
++        except GLib.GError as error:
++            helpers.show_error(self, str(error.message))
++            LOGGER.warning(str(error.message))
++            return
++
++        # until the load is done the buffer still holds the previous text;
++        # no typing into it, and a failed load goes back
++        if self._before_load is None:
++            self._before_load = (self.current.gfile, self.loaded_uri,
++                                 self.disk_etag, self.base_bytes)
++        self.textview.set_editable(False)
++        self._load_generation += 1
          self.current.gfile = file
 +        self.loaded_uri = None
 +        self.disk_etag = None
 +        self.base_bytes = None
-+        self.after_load = None
          self.preview_security_handler.set_file_security_level()
  
          self.current.gfile.load_contents_async(None,
-@@ -528,25 +573,42 @@
+-                                               self._load_contents_cb, None)
++                                               self._load_contents_cb,
++                                               self._load_generation)
+         self._set_file_monitor()
+ 
+     @Gtk.Template.Callback()
+@@ -528,38 +612,82 @@
          self.load_file(self.current.gfile)
  
      def _set_file_monitor(self, *args, **kwargs):
@@ -182,37 +248,84 @@
 +        # book panes: reload when there are no unsaved edits, else ask
 +        self.book.sync_with_disk()
  
-     def _load_contents_cb(self, gfile, result, user_data=None):
+-    def _load_contents_cb(self, gfile, result, user_data=None):
++    def _load_contents_cb(self, gfile, result, generation=None):
 +        # a newer load_file() superseded this one
-+        stale = not self.current.gfile or not gfile.equal(self.current.gfile)
++        stale = (generation != self._load_generation
++                 or not self.current.gfile
++                 or not gfile.equal(self.current.gfile))
          try:
              _success, contents, _etag = gfile.load_contents_finish(result)
          except GLib.GError as error:
 +            if stale:
 +                return
++            self._load_failed()
              helpers.show_error(self, str(error.message))
              LOGGER.warning(str(error.message))
              return
 +        if stale:
 +            return
++        if not self.show_contents(gfile, contents, _etag):
++            self._load_failed()
  
++    def _load_failed(self):
++        """book panes: the buffer still holds the file shown before the
++        load; make that the current file again."""
++        self.textview.set_editable(True)
++        if self._before_load is not None:
++            (previous, self.loaded_uri,
++             self.disk_etag, self.base_bytes) = self._before_load
++            self._before_load = None
++            self.current.gfile = previous
++            if self.current.gfile is not previous:
++                # it is gone from the disk; the buffer still holds its text
++                self.current._gfile = previous
++            self.preview_security_handler.set_file_security_level()
++            self._set_file_monitor()
++
++    def show_contents(self, gfile, contents, _etag):
++        """Put a file's bytes into the buffer; False when they are not text.
++        book panes: split from _load_contents_cb, reloads call it directly."""
++        contents = bytes(contents)
          try:
              try:
-@@ -575,6 +637,13 @@
+-                self.current.encoding = 'UTF-8'
+-                decoded = contents.decode(self.current.encoding)
++                encoding = 'UTF-8'
++                decoded = contents.decode(encoding)
+             except UnicodeDecodeError:
+-                self.current.encoding = chardet.detect(contents)['encoding']
+-                decoded = contents.decode(self.current.encoding)
+-        except UnicodeDecodeError as error:
+-            helpers.show_error(self, str(error.message))
+-            LOGGER.warning(str(error.message))
+-            return
++                encoding = chardet.detect(contents)['encoding']
++                decoded = contents.decode(encoding)
++        except (UnicodeDecodeError, TypeError, LookupError) as error:
++            helpers.show_error(self, str(error))
++            LOGGER.warning(str(error))
++            return False
+         else:
++            self.current.encoding = encoding
++            self._before_load = None
++            self.textview.set_editable(True)
+             self.textview.set_text(decoded)
+             self.preview_security_handler.assert_security_risk(decoded)
+             start_iter = self.textview.get_buffer().get_start_iter()
+@@ -575,6 +703,11 @@
              self.update_headerbar_title()
  
              self.did_change = False
 +            self.loaded_uri = gfile.get_uri()
 +            self.disk_etag = _etag
-+            self.base_bytes = bytes(contents)
++            self.base_bytes = contents
 +            self.disk_conflict = False
-+            hook, self.after_load = self.after_load, None
-+            if hook is not None:
-+                hook()
++            return True
  
      def check_change(self,
                       callback = None):
-@@ -722,6 +791,10 @@
+@@ -722,6 +855,10 @@
              self.run_dispose()
              return False
  

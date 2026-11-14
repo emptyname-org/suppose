@@ -8,40 +8,53 @@ import json
 import os
 import socket
 import sys
+import time
 
 SOCKET_ENV = "BOOK_EDITOR_SOCKET"
-TIMEOUT_SECONDS = 10.0
+TIMEOUT_SECONDS = 15.0  # whole exchange; the editor's own deadline is shorter
+MAX_REPLY_BYTES = 64 * 1024 * 1024
 REFUSED = 1
+UNANSWERED = 3
 
 
 class ChannelError(Exception):
     """The editor did not carry out the request."""
 
 
+class Unanswered(ChannelError):
+    """The request was sent, no whole answer came: its outcome is unknown."""
+
+
 def ask(request, path=None, timeout=TIMEOUT_SECONDS):
-    """Send one request to the editor and return its reply."""
+    """Send one request to the editor and return its reply. timeout bounds
+    the whole exchange."""
     path = path or os.environ.get(SOCKET_ENV)
     if not path:
         raise ChannelError(f"not in the book editor's terminal ({SOCKET_ENV} unset)")
+    end = time.monotonic() + timeout
     received = bytearray()
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        try:
             connection.settimeout(timeout)
             connection.connect(path)
+        except OSError as error:
+            raise ChannelError(f"cannot reach the editor: {error}") from error
+        try:
             connection.sendall(json.dumps(request).encode("utf-8") + b"\n")
             while not received.endswith(b"\n"):
+                connection.settimeout(max(0.001, end - time.monotonic()))
                 chunk = connection.recv(65536)
-                if not chunk:
-                    break
                 received += chunk
-    except OSError as error:
-        raise ChannelError(f"no answer from the editor: {error}") from error
+                if not chunk or len(received) > MAX_REPLY_BYTES:
+                    break
+        except OSError as error:
+            raise Unanswered(f"no answer from the editor: {error}") from error
     try:
         reply = json.loads(received.decode("utf-8"))
     except ValueError:
         reply = None
     if not isinstance(reply, dict):
-        raise ChannelError("no answer from the editor")
+        raise Unanswered("no answer from the editor")
     if not reply.get("ok"):
         raise ChannelError(str(reply.get("error") or "refused"))
     return reply
@@ -169,6 +182,11 @@ def main(tool, argv=None):
     try:
         run(arguments)
         sys.stdout.flush()
+    except Unanswered as error:
+        print(f"{parser.prog}: {error}", file=sys.stderr)
+        if tool == "edit":
+            print("The edit may have been made; check with book-view.", file=sys.stderr)
+        return UNANSWERED
     except ChannelError as error:
         print(f"{parser.prog}: {error}", file=sys.stderr)
         return REFUSED

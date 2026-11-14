@@ -194,6 +194,45 @@ class ServingTest(ChannelCase):
         self.assertEqual(self.requests, [{"later": True}])
 
 
+class UnreadReplyTest(ChannelCase):
+    """A client that asks and then does not read its answer."""
+
+    def big(self, _request):
+        self.requests.append("asked")
+        return {"text": "x" * (8 * 1024 * 1024)}
+
+    def ask_without_reading(self, path, then):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(path)
+            connection.sendall(b"{}\n")
+            wait_until(lambda: self.requests)
+            return then()
+
+    def test_it_is_dropped_at_the_deadline(self):
+        opened = self.open(self.big, deadline_seconds=0.4)
+
+        def until_dropped():
+            self.assertTrue(opened.exchanges)  # the reply does not fit, it waits
+            wait_until(lambda: not opened.exchanges)
+            return True
+
+        self.assertTrue(
+            run_with_loop(lambda: self.ask_without_reading(opened.path, until_dropped))
+        )
+
+    def test_close_drops_it_with_the_reply_half_sent(self):
+        opened = self.open(self.big, deadline_seconds=30)
+
+        def close_now():
+            GLib.idle_add(opened.close)
+            wait_until(lambda: opened.service is None)
+            return set(opened.exchanges)
+
+        left = run_with_loop(lambda: self.ask_without_reading(opened.path, close_now))
+        self.assertEqual(left, set())
+        self.assertEqual(os.listdir(self.base), [])
+
+
 class LifecycleTest(ChannelCase):
     def test_socket_is_private_to_the_user(self):
         opened = self.open()
