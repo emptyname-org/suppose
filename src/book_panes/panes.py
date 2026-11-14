@@ -158,28 +158,55 @@ def agent_runs(pid):
         return False
 
 
+def group_exists(pid):
+    """True while the agent's process group has a member: the agent or what
+    it started."""
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 OPEN_PANES: set["BookPanes"] = set()  # of windows not closed yet
 STARTING: set["BookPanes"] = set()  # with an agent start under way
-# agents hung up by closed windows: pid -> time.monotonic() to kill
+# agents hung up, with what they started: pid -> time.monotonic() to kill
 ENDING: dict[int, float] = {}
 
 
 def end_agent(pid):
-    """Hang up an agent whose window is gone; it is killed when it stays."""
-    if signal_agent(pid, signal.SIGHUP):
-        ENDING[pid] = time.monotonic() + KILL_AFTER_MS / 1000
-        GLib.timeout_add(KILL_AFTER_MS, kill_ending, pid)
+    """Hang up the agent and what it started. What is left of them when the
+    time is up is killed. False when there is nothing to hang up."""
+    if not signal_agent(pid, signal.SIGHUP):
+        return False
+    ENDING[pid] = time.monotonic() + KILL_AFTER_MS / 1000
+    GLib.timeout_add(KILL_AFTER_MS, kill_ending, pid)
+    return True
+
+
+def kill_agent(pid):
+    """Kill the agent's process group, and the agent itself should it have
+    moved to another group. The group id is the agent's pid; pids are handed
+    out in a cycle, so seconds after the hangup it is not yet another's."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    if agent_runs(pid):
+        os.kill(pid, signal.SIGKILL)
 
 
 def kill_ending(pid):
-    if ENDING.pop(pid, None) is not None and agent_runs(pid):
-        signal_agent(pid, signal.SIGKILL)
+    if ENDING.pop(pid, None) is not None:
+        kill_agent(pid)
     return GLib.SOURCE_REMOVE
 
 
 def on_shutdown(*_args):
     """The application ends and the main loop with it: close what quitting
-    left open, give the agents hung up their time, kill those that stay."""
+    left open, give the agents hung up their time, kill what stays."""
     for panes in list(OPEN_PANES):
         panes.close()
     # a start under way reports its child through the main context
@@ -191,10 +218,14 @@ def on_shutdown(*_args):
     while ENDING:
         now = time.monotonic()
         for pid, deadline in list(ENDING.items()):
-            if not agent_runs(pid):
+            try:  # nobody else collects an agent that exited from here on
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            if not group_exists(pid):
                 del ENDING[pid]
             elif now >= deadline:
-                signal_agent(pid, signal.SIGKILL)
+                kill_agent(pid)
                 del ENDING[pid]
         if ENDING:
             time.sleep(0.05)
@@ -225,7 +256,6 @@ class BookPanes:
         self.child_pid = None  # the running agent
         self.spawning = None  # cancellable of a start under way
         self.restart_pending = False  # the agent was told to go, start anew
-        self.kill_timer = 0
         self.closed = False
         self.wanted = None  # file asked for, shown once edits are saved
         self.autosave_timer = 0
@@ -485,7 +515,6 @@ class BookPanes:
             "sync_timer",
             "disk_poll_timer",
             "tree_poll_timer",
-            "kill_timer",
         ):
             timer = getattr(self, name)
             if timer:
@@ -791,9 +820,6 @@ class BookPanes:
 
     def _on_child_exited(self, _terminal, _status):
         self.child_pid = None
-        if self.kill_timer:
-            GLib.source_remove(self.kill_timer)
-            self.kill_timer = 0
         if self.closed:
             return
         if self.restart_pending:
@@ -810,21 +836,11 @@ class BookPanes:
         if self.spawning is not None or self.restart_pending:
             return  # a new agent is on its way
         if self.child_pid is not None:
-            if signal_agent(self.child_pid, signal.SIGHUP):
-                self.restart_pending = True  # started when this one has exited
-                self.kill_timer = GLib.timeout_add(
-                    KILL_AFTER_MS, self._on_kill_timer, self.child_pid
-                )
-                return
-            self.child_pid = None  # gone already, no exit will be reported
+            self.restart_pending = True  # started when this one's exit is told
+            end_agent(self.child_pid)
+            return
         self.terminal.reset(True, True)
         self._spawn()
-
-    def _on_kill_timer(self, pid):
-        self.kill_timer = 0
-        if self.child_pid == pid and agent_runs(pid):
-            signal_agent(pid, signal.SIGKILL)
-        return GLib.SOURCE_REMOVE
 
     def send_context(self):
         """Paste a reference to the open file and the selection to the agent."""

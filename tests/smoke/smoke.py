@@ -10,6 +10,8 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
+import time
 
 import gi
 
@@ -99,6 +101,46 @@ def processes_in(folder):
             except OSError:
                 pass  # gone meanwhile, or not ours
     return found
+
+
+def shutdown_ends(script):
+    """Run the script the way an agent runs, hang it up and let the shutdown
+    handler see to it: the seconds that took and the processes left."""
+    folder = tempfile.mkdtemp(dir=SCRATCH)
+    with subprocess.Popen(
+        ["/bin/sh", "-c", script],
+        cwd=folder,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    ) as agent:
+        for _line in range(script.count("echo ready")):
+            agent.stdout.readline()
+        started = time.monotonic()
+        panes.end_agent(agent.pid)
+        panes.on_shutdown()
+        taken = time.monotonic() - started
+        left = processes_in(folder)
+        for _attempt in range(20):
+            if not left:
+                break
+            time.sleep(0.1)
+            left = processes_in(folder)
+    return taken, left
+
+
+def check_shutdown():
+    """What the shutdown handler does with the agents hung up before it."""
+    patience = panes.KILL_AFTER_MS
+    panes.KILL_AFTER_MS = 500
+    taken, left = shutdown_ends("exec cat")
+    check("shutdown: an agent that goes is not waited for", taken < 0.4 and not left)
+    taken, left = shutdown_ends("trap '' HUP; echo ready; exec cat")
+    check("shutdown: an agent ignoring the hangup is killed", not left)
+    check("shutdown: after the time it was given", taken >= 0.4)
+    taken, left = shutdown_ends("(trap '' HUP; echo ready; exec sleep 300) & exec cat")
+    check("shutdown: what an agent that went left behind is killed", not left)
+    panes.KILL_AFTER_MS = patience
 
 
 def start_tool(book, *argv, stdin=None):
@@ -513,6 +555,18 @@ def scenario(app):
         and not runs(stubborn)
         and len(spawned) == 3,
     )
+    # an agent that goes at the hangup and leaves behind one that does not
+    book.command = "(trap '' HUP; exec sleep 300) & exec cat"
+    book.restart()
+    yield 1500
+    check("restart: agent with a helper of its own", len(processes_in(BOOK)) == 2)
+    book.command = command
+    book.restart()
+    yield 1900
+    check(
+        "restart: what the old agent left behind is killed",
+        processes_in(BOOK) == [book.child_pid] and len(spawned) == 5,
+    )
     STATE["pid"] = book.child_pid
 
     check(
@@ -525,9 +579,11 @@ def scenario(app):
 
     if WATCHING:
         # the window closes with unsaved text and an agent ignoring the hangup
-        book.command = "trap '' HUP; echo stubborn; exec cat"
+        # and has started a helper that ignores it too
+        book.command = "(trap '' HUP; exec sleep 300) & trap '' HUP; exec cat"
         book.restart()
         yield 1500
+        check("close: agent and helper run", len(processes_in(BOOK)) == 2)
         STATE["pid"] = book.child_pid
         append(window, "bye\n")
         window.close()
@@ -573,6 +629,8 @@ def main():
     write(CH2, CH2_TEXT)
     write(os.path.join(BOOK, "notes.txt"), "notes\n")
     write(os.path.join(BOOK, ".hidden"), "x\n")
+
+    check_shutdown()
 
     app = Application("org.gnome.gitlab.somas.Apostrophe")
     app.set_flags(app.get_flags() | Gio.ApplicationFlags.NON_UNIQUE)
