@@ -1,0 +1,238 @@
+--- a/bin/apostrophe
++++ b/bin/apostrophe
+@@ -36,8 +36,10 @@
+ 
+ import apostrophe
+ 
+-localedir = '/usr/share/locale'
+-pkgdatadir = '/usr/share/apostrophe'
++# book panes: found from this file, so the install can live anywhere
++_PREFIX = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
++localedir = os.path.join(_PREFIX, 'share', 'locale')
++pkgdatadir = os.path.join(_PREFIX, 'share', 'apostrophe')
+ 
+ # L10n
+ locale.textdomain('apostrophe')
+--- a/lib/python3/dist-packages/apostrophe/config.py
++++ b/lib/python3/dist-packages/apostrophe/config.py
+@@ -1,5 +1,10 @@
++import os
++
+ APP_ID = "org.gnome.gitlab.somas.Apostrophe"
+-PKGDATA_DIR = "/usr/share/apostrophe"
++# book panes: found from this file, so the install can live anywhere
++PKGDATA_DIR = os.path.normpath(os.path.join(
++    os.path.dirname(os.path.abspath(__file__)),
++    "..", "..", "..", "..", "share", "apostrophe"))
+ PROFILE = ""
+ NAME_SUFFIX = ""
+ VERSION = "3.2"
+--- a/lib/python3/dist-packages/apostrophe/main_window.py
++++ b/lib/python3/dist-packages/apostrophe/main_window.py
+@@ -92,6 +92,18 @@
+ 
+         self.current = File()
+ 
++        # book panes: uri whose content is in the buffer, save in flight,
++        # one-shot hook run after the next successful load, etag of the
++        # disk version the buffer is based on, unresolved disk conflict
++        self.loaded_uri = None
++        self.saving = False
++        self.after_load = None
++        self.disk_etag = None
++        self.base_bytes = None
++        self.disk_conflict = False
++        self._saving_quiet = False
++        self._saving_bytes = None
++
+         # Setup text editor
+         self.textview = self.editor.textview
+         self.textview.get_buffer().connect('changed', self.on_text_changed)
+@@ -291,6 +303,10 @@
+         if self.get_application()._application_id == 'org.gnome.gitlab.somas.Apostrophe.Devel':
+             self.add_css_class('devel')
+ 
++        # book panes: folder tree (left) and agent terminal (right)
++        import book_panes
++        self.book = book_panes.install(self)
++
+ 
+     def on_text_changed(self, *_args):
+         """called when the text changes, sets the self.did_change to true and
+@@ -338,12 +354,15 @@
+     def load_preview(self, *args):
+         self.current.security_level = PreviewSecurity.UNRESTRICTED
+ 
+-    def save_document(self, _action=None, _value=None, callback=None):
++    def save_document(self, _action=None, _value=None, callback=None,
++                      quiet=False):
+         """Try to save buffer in the current gfile.
+         If the file doesn't exist calls save_document_as
++        quiet: autosave, no headerbar reveal or progress bar
+         """
+ 
+-        self.reveal_headerbar_bottombar()
++        if not quiet:
++            self.reveal_headerbar_bottombar()
+         if self.current.gfile:
+             LOGGER.info("saving")
+ 
+@@ -368,13 +387,18 @@
+                 LOGGER.warning(str(error.reason))
+                 return
+             else:
+-                self.save_progressbar.set_opacity(1)
+-                self.save_progressbar.set_visible(True)
+-                self.progressbar_animation.play()
+-
++                if not quiet:
++                    self.save_progressbar.set_opacity(1)
++                    self.save_progressbar.set_visible(True)
++                    self.progressbar_animation.play()
++
++                self.saving = True
++                self._saving_bytes = encoded_text
++                self._saving_quiet = quiet
++                # autosave never overwrites a version it has not seen
+                 self.current.gfile.replace_contents_bytes_async(
+                     GLib.Bytes.new(encoded_text),
+-                    etag=None,
++                    etag=self.disk_etag if quiet else None,
+                     make_backup=False,
+                     flags=Gio.FileCreateFlags.NONE,
+                     cancellable=None,
+@@ -433,6 +457,7 @@
+         self.filechooser.show()
+ 
+     def _replace_contents_cb(self, gfile, result, callback=None):
++        self.saving = False
+         try:
+             success, _etag = gfile.replace_contents_finish(result)
+         except GLib.GError as error:
+@@ -440,6 +465,11 @@
+             self.did_change = True
+             self.progressbar_fade_out.play()
+             self._set_file_monitor()
++            if self._saving_quiet and error.matches(
++                    Gio.io_error_quark(), Gio.IOErrorEnum.WRONG_ETAG):
++                # changed on disk under unsaved edits: reload or ask
++                self.book.sync_with_disk()
++                return False
+             helpers.show_error(self, str(error.message))
+             return False
+ 
+@@ -447,8 +477,19 @@
+             if self.progressbar_animation.get_state() == Adw.AnimationState.PAUSED:
+                 self.progressbar_animation.resume()
+ 
+-            self.update_headerbar_title()
+-            self.did_change = False
++            # text typed while the save was in flight is still unsaved
++            try:
++                current_bytes = self.textview.get_text()\
++                    .encode(self.current.encoding)
++            except UnicodeEncodeError:
++                current_bytes = None
++            self.did_change = current_bytes != self._saving_bytes
++            if self.current.gfile and self.current.gfile.equal(gfile):
++                self.loaded_uri = gfile.get_uri()
++                self.disk_etag = _etag
++                self.base_bytes = self._saving_bytes
++                self.disk_conflict = False
++            self.update_headerbar_title(self.did_change)
+             # We add a 1ms delay to the call to avoid race conditions
+             # see #456
+             GLib.timeout_add(500, self._set_file_monitor, None, 0)
+@@ -516,6 +557,10 @@
+         LOGGER.info("trying to open %s", file.get_uri())
+ 
+         self.current.gfile = file
++        self.loaded_uri = None
++        self.disk_etag = None
++        self.base_bytes = None
++        self.after_load = None
+         self.preview_security_handler.set_file_security_level()
+ 
+         self.current.gfile.load_contents_async(None,
+@@ -528,25 +573,42 @@
+         self.load_file(self.current.gfile)
+ 
+     def _set_file_monitor(self, *args, **kwargs):
++        if self.file_monitor:
++            self.file_monitor.cancel()
++            self.file_monitor = None
+         if self.current.gfile:
+             self.file_monitor = self.current.gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+             self.file_monitor.connect("changed", self._on_file_changed)
++            # changes made while the monitor was off (during a save)
++            book = getattr(self, "book", None)
++            if book is not None:
++                book.check_disk()
+ 
+     @Gtk.Template.Callback()
+     def dismiss_discard_infobar(self, dialog, response):
+         if response == Gtk.ResponseType.CLOSE:
+             self.discard_infobar.set_revealed(False)
++            # keep the buffer: later saves may overwrite the disk version
++            self.disk_conflict = False
++            self.disk_etag = None
+ 
+     def _on_file_changed(self, file, other_file, event, *args):
+-        self.discard_infobar.set_revealed(True)
++        # book panes: reload when there are no unsaved edits, else ask
++        self.book.sync_with_disk()
+ 
+     def _load_contents_cb(self, gfile, result, user_data=None):
++        # a newer load_file() superseded this one
++        stale = not self.current.gfile or not gfile.equal(self.current.gfile)
+         try:
+             _success, contents, _etag = gfile.load_contents_finish(result)
+         except GLib.GError as error:
++            if stale:
++                return
+             helpers.show_error(self, str(error.message))
+             LOGGER.warning(str(error.message))
+             return
++        if stale:
++            return
+ 
+         try:
+             try:
+@@ -575,6 +637,13 @@
+             self.update_headerbar_title()
+ 
+             self.did_change = False
++            self.loaded_uri = gfile.get_uri()
++            self.disk_etag = _etag
++            self.base_bytes = bytes(contents)
++            self.disk_conflict = False
++            hook, self.after_load = self.after_load, None
++            if hook is not None:
++                hook()
+ 
+     def check_change(self,
+                      callback = None):
+@@ -722,6 +791,10 @@
+             self.run_dispose()
+             return False
+ 
++        # book panes: save instead of asking
++        if self.book.save_before_close():
++            return True
++
+         # called if check_change decides we can throw away the contents of the textview
+         def callback(window):
+             # save state if we're the last window group left
+--- a/lib/python3/dist-packages/apostrophe/panels.py
++++ b/lib/python3/dist-packages/apostrophe/panels.py
+@@ -247,6 +247,10 @@
+                     content.natural_baseline)
+ 
+     def do_unroot(self):
++        # book panes move the editor into a new parent once; keep the children
++        if getattr(self, "keep_children_on_unroot", False):
++            Gtk.Widget.do_unroot(self)
++            return
+         self.content_container.unparent()
+         self.panel_container.unparent()
+         self.separator.unparent()

@@ -1,0 +1,8 @@
+"""Book panes for Apostrophe: folder tree, agent terminal, editor channel."""
+
+
+def install(window):
+    """Wrap the window's editor with the tree and the agent terminal."""
+    from .panes import BookPanes
+
+    return BookPanes(window)

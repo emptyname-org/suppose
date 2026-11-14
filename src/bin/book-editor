@@ -1,0 +1,24 @@
+#!/bin/sh
+# Apostrophe with book panes: folder tree (left), agent terminal (right).
+# Usage: book-editor [FOLDER] [FILE...]   (FOLDER default: current directory)
+# BOOK_EDITOR_MAIN replaces the program run in this environment (tests).
+here=$(dirname "$(readlink -f "$0")")
+root=$(dirname "$here")
+usr=$root/usr
+for lib in "$usr"/lib/*-linux-gnu*; do break; done
+if [ ! -d "$lib" ]; then
+    echo "book-editor: no Apostrophe in $usr; run make build" >&2
+    exit 1
+fi
+if [ -n "${1:-}" ] && [ -d "$1" ]; then
+    cd "$1" || exit 1
+    shift
+fi
+export BOOK_ROOT="${BOOK_ROOT:-$PWD}"
+export BOOK_AGENT_CMD="${BOOK_AGENT_CMD:-$here/book-agent}"
+export PYTHONPATH="$root:$usr/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GI_TYPELIB_PATH="$lib/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
+export GSETTINGS_SCHEMA_DIR="$usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
+export XDG_DATA_DIRS="$usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+exec /usr/bin/python3 "${BOOK_EDITOR_MAIN:-$usr/bin/apostrophe}" "$@"
