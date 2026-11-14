@@ -1,6 +1,8 @@
 #!/bin/sh
 # Apostrophe with book panes: folder tree (left), agent terminal (right).
-# Usage: book-editor [FOLDER] [FILE...]   (FOLDER default: current directory)
+# Usage: book-editor [FOLDER | FILE...]
+# The working folder is FOLDER, or the folder of FILE, or BOOK_ROOT, or the
+# one used last, or the one chosen in a dialog.
 # BOOK_EDITOR_MAIN replaces the program run in this environment (tests).
 here=$(dirname "$(readlink -f "$0")")
 root=$(dirname "$here")
@@ -10,15 +12,37 @@ if [ ! -d "$lib" ]; then
     echo "book-editor: no Apostrophe in $usr; run make build" >&2
     exit 1
 fi
-if [ -n "${1:-}" ] && [ -d "$1" ]; then
-    cd "$1" || exit 1
-    shift
+# this machine's settings, NAME=value lines: BOOK_CLAUDE, CLAUDE_CONFIG_DIR, ...
+settings=${XDG_CONFIG_HOME:-$HOME/.config}/book-editor/environment
+if [ -r "$settings" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "$settings"
+    set +a
 fi
-export BOOK_ROOT="${BOOK_ROOT:-$PWD}"
-export BOOK_AGENT_CMD="${BOOK_AGENT_CMD:-$here/book-agent}"
 export PYTHONPATH="$root:$usr/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
 export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GI_TYPELIB_PATH="$lib/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
 export GSETTINGS_SCHEMA_DIR="$usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
 export XDG_DATA_DIRS="$usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+
+folder=
+if [ -n "${1:-}" ] && [ -d "$1" ]; then
+    folder=$1
+    shift
+elif [ -n "${1:-}" ] && [ -e "$1" ]; then
+    folder=$(dirname -- "$1")
+elif [ -n "${BOOK_ROOT:-}" ]; then
+    folder=$BOOK_ROOT
+else
+    last=${XDG_STATE_HOME:-$HOME/.local/state}/book-editor/last-folder
+    if [ -r "$last" ]; then
+        IFS= read -r folder <"$last" || true
+    fi
+    if [ -z "$folder" ] || [ ! -d "$folder" ]; then
+        folder=$(/usr/bin/python3 -m book_panes.choose) || exit 0
+    fi
+fi
+BOOK_ROOT=$(cd -- "$folder" && pwd) || exit 1
+export BOOK_ROOT
 exec /usr/bin/python3 "${BOOK_EDITOR_MAIN:-$usr/bin/apostrophe}" "$@"

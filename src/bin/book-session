@@ -1,0 +1,12 @@
+#!/usr/bin/python3
+"""book-session FOLDER: Claude Code's hook that tells the folder which
+conversation the agent opened. See book_panes/engines.py."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+from book_panes.engines import hook_main
+
+sys.exit(hook_main())

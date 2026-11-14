@@ -28,7 +28,7 @@ Gio.Resource._register(
 from apostrophe import helpers  # after the resources: it loads widgets
 from apostrophe.application import Application
 
-from book_panes import agents, channel, folders, panes
+from book_panes import agents, channel, engines, folders, panes
 
 WATCHING = os.environ.get("SMOKE_WATCH") != "0"
 if not WATCHING:  # as with the inotify limit reached
@@ -100,10 +100,10 @@ def child_runs(pid):
 
 
 def processes_in(folder):
-    """Pids of the processes whose working directory is the folder."""
+    """Pids of the other processes whose working directory is the folder."""
     found = []
     for name in os.listdir("/proc"):
-        if name.isdigit():
+        if name.isdigit() and int(name) != os.getpid():
             try:
                 if os.readlink(f"/proc/{name}/cwd") == folder:
                     found.append(int(name))
@@ -600,7 +600,93 @@ def scenario(app):
         "restart: the next one is held again",
         processes_in(BOOK) == [book.child_pid] and len(spawned) == 7,
     )
+
+    # the agent engines, in place of a command of the user's own
+    kept = os.path.join(BOOK, ".book-editor")
+    check(
+        "engine: none chosen yet, claude is the one",
+        book.engine == "claude" and not os.path.exists(kept),
+    )
+    book.command = None
+    book.restart()
+    yield 2500
+    text = " ".join(terminal_text(book).split())
+    check(
+        "engine: claude opens the folder's conversation",
+        "engine=claude args=--append-system-prompt" in text
+        and "--session-id" in text
+        and book.running_engine == "claude",
+    )
+    check(
+        "engine: the conversation is on record in the folder",
+        len(read(os.path.join(kept, "claude", "session")).strip()) == 36,
+    )
+    choice = Gtk.DropDown.new_from_strings(list(engines.ENGINES.values()))
+    choice.set_selected(list(engines.ENGINES).index("codex"))
+    book._on_engine_chosen(choice, None)
+    yield 3000
+    text = " ".join(terminal_text(book).split())
+    check(
+        "engine: codex takes over, the editor's tools with it",
+        "engine=codex args=-c mcp_servers.book_editor.command=" in text
+        and "BOOK_EDITOR_SOCKET=" in text
+        and book.running_engine == "codex",
+    )
+    check(
+        "engine: the choice is kept in the folder", read(kept + "/engine") == "codex\n"
+    )
+    check(
+        "engine: the folder's record stays out of the tree",
+        tree_names(book) == ["part", "ch2.md", "ch3.md", "added.md", "ch1.md"],
+    )
+    # another engine is chosen while one starts
+    os.killpg(book.child_pid, signal.SIGKILL)
+    yield 1200
+    book.restart()
+    check("engine: a start is under way", book.spawning is not None)
+    book.set_engine("claude")
+    book.set_engine("claude")
+    book.set_engine("eliza")
+    yield 3500
+    text = " ".join(terminal_text(book).split())
+    check(
+        "engine: the one chosen meanwhile is the one that runs",
+        "engine=claude args=" in text
+        and "--session-id" in text
+        and book.running_engine == "claude"
+        and read(kept + "/engine") == "claude\n",
+    )
+    book.command = command
+    book.restart()
+    yield 2500
+    check(
+        "engine: a command of the user's own runs again",
+        processes_in(BOOK) == [book.child_pid] and "agent-ok" in terminal_text(book),
+    )
     STATE["pid"] = book.child_pid
+
+    # another editor is started for another folder
+    fake = os.path.join(SCRATCH, "fake-bin")
+    os.makedirs(fake)
+    write(
+        os.path.join(fake, "book-editor"),
+        "#!/bin/sh\n"
+        'echo "$1|${BOOK_ROOT:-}|${BOOK_EDITOR_SOCKET:-}|${PYTHONPATH:-}" >"$OUT"\n',
+    )
+    os.chmod(os.path.join(fake, "book-editor"), 0o755)
+    tools, panes.TOOLS_DIR = panes.TOOLS_DIR, fake
+    os.environ["OUT"] = os.path.join(SCRATCH, "launched")
+    panes.launch_editor(os.path.join(BOOK, "part"))
+    panes.TOOLS_DIR = tools
+    yield 800
+    check(
+        "folder: another editor starts on it, free of this one's environment",
+        read(os.path.join(SCRATCH, "launched")) == os.path.join(BOOK, "part") + "|||\n",
+    )
+    check(
+        "folder: the one in use is remembered for the next start",
+        read(panes.state_file("last-folder")) == BOOK + "\n",
+    )
 
     check(
         "tree: unchanged by the editor's own saves",
@@ -619,7 +705,32 @@ def scenario(app):
         check("close: agent and helper run", len(processes_in(BOOK)) == 2)
         STATE["pid"] = book.child_pid
         append(window, "bye\n")
-        window.close()
+        # it closes because another folder is opened
+
+        class Dialog:
+            def __init__(self, folder):
+                self.folder = folder
+
+            def select_folder_finish(self, _result):
+                if self.folder is None:
+                    raise GLib.GError("dismissed")
+                return Gio.File.new_for_path(self.folder)
+
+        def no_editor(_folder):
+            raise GLib.GError("no such file")
+
+        launched = STATE["launched"] = []
+        panes.launch_editor = no_editor
+        book.open_folder(Gio.File.new_for_path(os.path.join(BOOK, "part")))
+        panes.launch_editor = launched.append
+        book._on_folder_chosen(Dialog(None), None)
+        book._on_folder_chosen(Dialog(BOOK), None)
+        book._on_folder_chosen(Dialog(os.path.join(BOOK, "missing")), None)
+        check(
+            "folder: no other folder, no other editor: this window stays",
+            launched == [] and not book.closed,
+        )
+        book._on_folder_chosen(Dialog(os.path.join(BOOK, "part")), None)
     else:
         # the application quits with the window open while an agent starts
         os.kill(book.child_pid, signal.SIGKILL)
@@ -673,6 +784,11 @@ def main():
     )
     app.run([])
 
+    if WATCHING:
+        check(
+            "folder: another one opens in an editor of its own",
+            STATE.get("launched") == [os.path.join(BOOK, "part")],
+        )
     check(
         "close: unsaved edit saved",
         read(CH2) == "# Deux\n\nSecond chapter.\nFin.\nbye\n",

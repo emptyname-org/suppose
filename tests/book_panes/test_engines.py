@@ -1,0 +1,599 @@
+"""The agent engines: which conversation a folder continues, and where its
+transcript is kept."""
+
+import contextlib
+import io
+import json
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import tempfile
+import time
+import unittest
+import uuid
+from unittest import mock
+
+from book_panes import engines
+
+from .test_channel import TMP
+
+SCRATCH = os.path.abspath(TMP)
+FAKE_CLAUDE = """#!/bin/sh
+# says how it was called; writes a transcript where Claude Code would
+: >"$OUT"
+for word; do printf '%s\\n' "$word" >>"$OUT"; done
+while [ $# -gt 0 ]; do
+    case $1 in
+    --session-id)
+        mkdir -p "$CLAUDE_CONFIG_DIR/projects/-a-book/$2"
+        echo first >"$CLAUDE_CONFIG_DIR/projects/-a-book/$2.jsonl"
+        shift
+        ;;
+    --resume)
+        echo more >>"$2"
+        shift
+        ;;
+    --settings)
+        settings=$2
+        shift
+        ;;
+    esac
+    shift
+done
+if [ -n "$FAKE_CLEAR" ]; then  # /clear: another conversation, told by the hook
+    mkdir -p "$CLAUDE_CONFIG_DIR/projects/-a-book"
+    echo cleared >"$CLAUDE_CONFIG_DIR/projects/-a-book/$FAKE_CLEAR.jsonl"
+    hook=$(python3 -c 'import json, sys
+print(json.loads(sys.argv[1])["hooks"]["SessionStart"][0]["hooks"][0]["command"])' \
+        "$settings")
+    printf '{"session_id": "%s", "source": "clear"}' "$FAKE_CLEAR" | sh -c "$hook"
+fi
+if [ -n "$FAKE_SLEEP" ]; then exec sleep "$FAKE_SLEEP"; fi
+exit "${FAKE_STATUS:-0}"
+"""
+FAKE_CODEX = """#!/bin/sh
+# says how it was called; writes a rollout where Codex would, and keeps it open
+: >"$OUT"
+for word; do printf '%s\\n' "$word" >>"$OUT"; done
+rollout() {
+    day=$CODEX_HOME/sessions/2026/11/14
+    mkdir -p "$day"
+    printf '{"type":"session_meta","payload":{"id":"%s","thread_source":"%s"}}\\n' \\
+        "$1" "${FAKE_SOURCE:-user}" >"$day/rollout-2026-11-14T10-00-00-$1.jsonl"
+    exec 4>>"$day/rollout-2026-11-14T10-00-00-$1.jsonl"
+}
+if [ "$1" = resume ]; then
+    for word; do
+        case $word in ????????-????-????-????-????????????) id=$word ;; esac
+    done
+    exec 3>>"$(find "$CODEX_HOME/sessions" -name "rollout-*-$id.jsonl")"
+    echo more >&3
+    if [ -z "$FAKE_NEW" ]; then exit "${FAKE_STATUS:-0}"; fi
+    sleep 0.1  # /new comes later than the last word of the conversation before
+    rollout "$FAKE_NEW"
+else
+    rollout "$FAKE_ID"
+fi
+sleep "${FAKE_SLEEP:-0.5}"
+if [ -f .book-editor/codex/session ]; then cp .book-editor/codex/session "$OUT.seen"; fi
+exit "${FAKE_STATUS:-0}"
+"""
+
+
+def read(path):
+    with open(path, encoding="utf-8") as source:
+        return source.read()
+
+
+class EngineCase(unittest.TestCase):
+    def setUp(self):
+        os.makedirs(SCRATCH, exist_ok=True)
+        self.scratch = os.path.realpath(tempfile.mkdtemp(prefix="en.", dir=SCRATCH))
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.book = os.path.join(self.scratch, "book")
+        self.config = os.path.join(self.scratch, "claude")
+        self.home = os.path.join(self.scratch, "codex")
+        self.out = os.path.join(self.scratch, "out")
+        os.makedirs(self.book)
+        for name, text in (("claude-fake", FAKE_CLAUDE), ("codex-fake", FAKE_CODEX)):
+            with open(os.path.join(self.scratch, name), "w") as target:
+                target.write(text)
+            os.chmod(os.path.join(self.scratch, name), 0o755)
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        for name in (
+            "BOOK_ENGINE",
+            "BOOK_EDITOR_SOCKET",
+            *(name for name in os.environ if name.startswith("FAKE_")),
+        ):
+            os.environ.pop(name, None)
+        os.environ.update(
+            BOOK_CLAUDE=os.path.join(self.scratch, "claude-fake"),
+            BOOK_CODEX=os.path.join(self.scratch, "codex-fake"),
+            CLAUDE_CONFIG_DIR=self.config,
+            CODEX_HOME=self.home,
+            XDG_STATE_HOME=os.path.join(self.scratch, "state"),
+            HOME=os.path.join(self.scratch, "home"),
+            OUT=self.out,
+        )
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.book)
+        for signum in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT, signal.SIGQUIT):
+            self.addCleanup(signal.signal, signum, signal.getsignal(signum))
+
+    def agent(self, engine, *extra, **changes):
+        """Run the engine as the pane does; (exit status, its arguments)."""
+        os.environ["BOOK_ENGINE"] = engine
+        os.environ.update(changes)
+        if os.path.exists(self.out):
+            os.unlink(self.out)
+        status = engines.main(list(extra))
+        called = read(self.out).splitlines() if os.path.exists(self.out) else None
+        return status, called
+
+    def kept(self, *parts):
+        return os.path.join(os.getcwd(), ".book-editor", *parts)
+
+    @contextlib.contextmanager
+    def another_agent(self, engine):
+        """The folder's conversation is in use by another agent meanwhile."""
+        guard = engines.claim(os.getcwd(), engine)
+        self.assertIsNotNone(guard)
+        try:
+            yield
+        finally:
+            os.close(guard)
+
+
+class RecordTest(EngineCase):
+    def test_a_folder_without_a_choice_gets_claude(self):
+        self.assertEqual(engines.chosen_engine(self.book), "claude")
+
+    def test_the_choice_is_kept_in_the_folder(self):
+        self.assertTrue(engines.choose_engine(self.book, "codex"))
+        self.assertEqual(engines.chosen_engine(self.book), "codex")
+        self.assertEqual(read(self.kept("engine")), "codex\n")
+
+    def test_an_unknown_choice_counts_as_none(self):
+        engines.write_word(self.book, "engine", "eliza")
+        self.assertEqual(engines.chosen_engine(self.book), "claude")
+
+    def test_the_record_is_private_and_kept_out_of_a_repository(self):
+        engines.choose_engine(self.book, "codex")
+        self.assertEqual(stat.S_IMODE(os.stat(self.kept()).st_mode), 0o700)
+        self.assertEqual(read(self.kept(".gitignore")), "*\n")
+
+    def test_a_gitignore_the_user_removed_stays_removed(self):
+        engines.choose_engine(self.book, "codex")
+        os.unlink(self.kept(".gitignore"))
+        engines.choose_engine(self.book, "claude")
+        self.assertFalse(os.path.exists(self.kept(".gitignore")))
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes anywhere")
+    def test_a_folder_that_takes_no_record_says_so(self):
+        os.chmod(self.book, 0o500)
+        self.addCleanup(os.chmod, self.book, 0o700)
+        self.assertFalse(engines.choose_engine(self.book, "codex"))
+        self.assertEqual(os.listdir(self.book), [])
+
+    def test_the_engine_named_by_the_pane_runs(self):
+        engines.choose_engine(self.book, "codex")
+        _status, called = self.agent("claude")
+        self.assertEqual(called[0], "--append-system-prompt")
+
+    def test_without_a_name_the_folders_choice_runs(self):
+        engines.choose_engine(self.book, "codex")
+        os.environ["FAKE_ID"] = str(uuid.uuid4())
+        self.assertEqual(engines.main([]), 0)
+        self.assertEqual(read(self.out), "")  # codex, called without arguments
+
+    def test_an_unknown_engine_name_runs_claude(self):
+        _status, called = self.agent("eliza")
+        self.assertEqual(called[0], "--append-system-prompt")
+
+
+class ClaudeTest(EngineCase):
+    def start(self, *extra, **changes):
+        status, called = self.agent("claude", *extra, **changes)
+        self.assertEqual(called[0], "--append-system-prompt")
+        self.assertIn("book-view", called[1])
+        if called[2:3] == ["--settings"]:
+            self.assertEqual(called[3], engines.claude_settings(os.getcwd()))
+            return status, called[4:]
+        return status, called[2:]
+
+    def in_home(self):
+        found = []
+        for folder, _folders, names in os.walk(self.config):
+            found += [os.path.join(folder, name) for name in names]
+        return found
+
+    def test_first_start_opens_a_conversation_whose_transcript_moves_in(self):
+        _status, (option, session) = self.start()
+        self.assertEqual(option, "--session-id")
+        self.assertEqual(str(uuid.UUID(session)), session)
+        self.assertEqual(read(self.kept("claude", "session")), session + "\n")
+        self.assertEqual(read(self.kept("claude", session + ".jsonl")), "first\n")
+        self.assertTrue(os.path.isdir(self.kept("claude", session)))
+        self.assertEqual(self.in_home(), [])
+
+    def test_the_next_start_resumes_the_transcript_in_the_folder(self):
+        _status, (_option, session) = self.start()
+        _status, called = self.start()
+        path = self.kept("claude", session + ".jsonl")
+        self.assertEqual(called, ["--resume", path])
+        self.assertEqual(read(path), "first\nmore\n")
+        self.assertEqual(self.in_home(), [])
+
+    def test_a_folder_moved_goes_on_where_it_stopped(self):
+        _status, (_option, session) = self.start()
+        moved = os.path.join(self.scratch, "elsewhere")
+        os.rename(self.book, moved)
+        os.chdir(moved)
+        _status, called = self.start()
+        self.assertEqual(
+            called,
+            [
+                "--resume",
+                os.path.join(moved, ".book-editor/claude", session + ".jsonl"),
+            ],
+        )
+
+    def test_a_transcript_left_in_claudes_home_is_taken_over(self):
+        session = str(uuid.uuid4())
+        engines.write_session(self.book, "claude", session)
+        folder = os.path.join(self.config, "projects", "-a-book")
+        os.makedirs(folder)
+        with open(os.path.join(folder, session + ".jsonl"), "w") as target:
+            target.write("left\n")
+        _status, called = self.start()
+        self.assertEqual(called[0], "--resume")
+        self.assertEqual(read(self.kept("claude", session + ".jsonl")), "left\nmore\n")
+
+    def test_an_id_without_a_transcript_is_replaced_not_reused(self):
+        unused = str(uuid.uuid4())
+        engines.write_session(self.book, "claude", unused)
+        _status, (option, session) = self.start()
+        self.assertEqual(option, "--session-id")
+        self.assertNotEqual(session, unused)
+
+    def test_the_conversation_of_an_earlier_version_is_taken_over(self):
+        session = str(uuid.uuid4())
+        earlier = os.path.join(
+            os.environ["XDG_STATE_HOME"],
+            "book-editor",
+            "sessions",
+            engines.folder_key(self.book),
+        )
+        os.makedirs(earlier)
+        with open(os.path.join(earlier, "session"), "w") as target:
+            target.write(session + "\n")
+        folder = os.path.join(self.config, "projects", "-a-book")
+        os.makedirs(folder)
+        with open(os.path.join(folder, session + ".jsonl"), "w") as target:
+            target.write("earlier\n")
+        _status, called = self.start()
+        self.assertEqual(called, ["--resume", self.kept("claude", session + ".jsonl")])
+        self.assertEqual(read(self.kept("claude", "session")), session + "\n")
+
+    def test_a_conversation_opened_in_claude_becomes_the_folders(self):
+        _status, (_option, first) = self.start()
+        opened = str(uuid.uuid4())
+        self.start(FAKE_CLEAR=opened)
+        self.assertEqual(read(self.kept("claude", "session")), opened + "\n")
+        self.assertEqual(read(self.kept("claude", opened + ".jsonl")), "cleared\n")
+        self.assertTrue(os.path.isfile(self.kept("claude", first + ".jsonl")))
+        self.assertEqual(self.in_home(), [])
+        _status, called = self.start()
+        self.assertEqual(called, ["--resume", self.kept("claude", opened + ".jsonl")])
+
+    def test_the_hook_finds_a_folder_with_any_name(self):
+        odd = os.path.join(self.scratch, 'it\'s a "book" $HOME')
+        os.makedirs(odd)
+        os.chdir(odd)
+        opened = str(uuid.uuid4())
+        self.start(FAKE_CLEAR=opened)
+        self.assertEqual(read(self.kept("claude", "session")), opened + "\n")
+
+    def test_the_hook_says_nothing_and_passes_over_what_it_cannot_read(self):
+        session = str(uuid.uuid4())
+        engines.write_session(self.book, "claude", session)
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+            for report in ("", "[]", "{}", '{"session_id": 5}', '{"session_id": "x"}'):
+                with mock.patch("sys.stdin", io.StringIO(report)):
+                    self.assertEqual(engines.hook_main([self.book]), 0)
+            self.assertEqual(engines.hook_main([]), 0)
+            report = json.dumps({"session_id": session.upper()})
+            with mock.patch("sys.stdin", io.StringIO(report)):
+                self.assertEqual(engines.hook_main([self.book]), 0)
+        self.assertEqual(said.getvalue(), "")
+        self.assertEqual(read(self.kept("claude", "session")), session + "\n")
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes anywhere")
+    def test_the_hook_leaves_a_folder_that_takes_no_record(self):
+        os.chmod(self.book, 0o500)
+        self.addCleanup(os.chmod, self.book, 0o700)
+        report = io.StringIO(json.dumps({"session_id": str(uuid.uuid4())}))
+        engines.note_claude(self.book, report)
+        self.assertFalse(os.path.exists(self.kept()))
+
+    def test_a_damaged_record_starts_a_new_conversation(self):
+        engines.write_word(self.book, "claude/session", "not an id")
+        _status, (option, _session) = self.start()
+        self.assertEqual(option, "--session-id")
+
+    def test_each_folder_has_its_own_conversation(self):
+        _status, (_option, first) = self.start()
+        other = os.path.join(self.scratch, "other")
+        os.makedirs(other)
+        os.chdir(other)
+        _status, (option, second) = self.start()
+        self.assertEqual(option, "--session-id")
+        self.assertNotEqual(first, second)
+
+    def test_a_second_agent_on_the_folder_gets_a_conversation_of_its_own(self):
+        _status, (_option, session) = self.start()
+        with self.another_agent("claude"):
+            _status, called = self.start()
+        self.assertEqual(called, [])
+        self.assertEqual(read(self.kept("claude", "session")), session + "\n")
+        _status, called = self.start()  # the other one ended
+        self.assertEqual(called[0], "--resume")
+
+    def test_without_a_place_for_claims_claude_still_starts(self):
+        blocked = os.path.join(self.scratch, "file")
+        with open(blocked, "w"):
+            pass
+        _status, called = self.start(XDG_STATE_HOME=blocked)
+        self.assertEqual(called, [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes anywhere")
+    def test_a_folder_that_takes_no_record_still_gets_claude(self):
+        os.chmod(self.book, 0o500)
+        self.addCleanup(os.chmod, self.book, 0o700)
+        _status, called = self.start()
+        self.assertEqual(called, [])
+
+    def test_more_arguments_are_handed_on(self):
+        _status, called = self.start("--model", "opus")
+        self.assertEqual(called[2:], ["--model", "opus"])
+        self.assertEqual(called[0], "--session-id")
+
+    def test_the_engines_exit_status_is_ours(self):
+        status, _called = self.start(FAKE_STATUS="3")
+        self.assertEqual(status, 3)
+
+    def test_a_missing_engine_is_reported(self):
+        os.environ["BOOK_CLAUDE"] = os.path.join(self.scratch, "nowhere")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, called = self.agent("claude")
+        self.assertEqual((status, called), (127, None))
+        self.assertIn("cannot run", errors.getvalue())
+        self.assertIn("BOOK_CLAUDE", errors.getvalue())
+
+
+class CodexTest(EngineCase):
+    def setUp(self):
+        super().setUp()
+        self.session = str(uuid.uuid4())
+        self.name = f"rollout-2026-11-14T10-00-00-{self.session}.jsonl"
+        self.link = os.path.join(self.home, "sessions/2026/11/14", self.name)
+        os.environ["FAKE_ID"] = self.session
+        watch = mock.patch.object(engines, "WATCH_SECONDS", 0.05)
+        watch.start()
+        self.addCleanup(watch.stop)
+
+    def rollout(self, session, source="user"):
+        """A rollout in Codex's home that nothing has open."""
+        day = os.path.dirname(self.link)
+        os.makedirs(day, exist_ok=True)
+        path = os.path.join(day, f"rollout-2026-11-14T10-00-00-{session}.jsonl")
+        header = {"type": "session_meta"}
+        header["payload"] = {"id": session, "thread_source": source}
+        with open(path, "w") as target:
+            target.write(json.dumps(header) + "\n")
+        return path
+
+    def start(self, *extra, **changes):
+        return self.agent("codex", *extra, **changes)
+
+    def test_first_start_opens_a_conversation_whose_rollout_moves_in(self):
+        _status, called = self.start()
+        self.assertEqual(called, [])
+        self.assertEqual(read(self.kept("codex", "session")), self.session + "\n")
+        self.assertTrue(os.path.isfile(self.kept("codex", self.name)))
+        self.assertFalse(os.path.islink(self.kept("codex", self.name)))
+        self.assertEqual(os.readlink(self.link), self.kept("codex", self.name))
+
+    def test_the_next_start_resumes_and_codex_writes_into_the_folder(self):
+        self.start()
+        before = read(self.kept("codex", self.name))
+        _status, called = self.start()
+        self.assertEqual(called, ["resume", self.session])
+        self.assertEqual(read(self.kept("codex", self.name)), before + "more\n")
+        self.assertTrue(os.path.islink(self.link))
+
+    def test_the_conversation_is_found_while_codex_runs(self):
+        self.start()
+        self.assertEqual(read(self.out + ".seen"), self.session + "\n")
+
+    def test_a_conversation_opened_in_codex_becomes_the_folders(self):
+        self.start()
+        opened = str(uuid.uuid4())
+        _status, called = self.start(FAKE_NEW=opened)
+        self.assertEqual(called, ["resume", self.session])
+        self.assertEqual(read(self.out + ".seen"), opened + "\n")
+        name = f"rollout-2026-11-14T10-00-00-{opened}.jsonl"
+        self.assertEqual(
+            os.readlink(os.path.join(os.path.dirname(self.link), name)),
+            self.kept("codex", name),
+        )
+        self.assertTrue(os.path.isfile(self.kept("codex", self.name)))
+        os.environ.pop("FAKE_NEW")
+        _status, called = self.start()
+        self.assertEqual(called, ["resume", opened])
+
+    def test_a_folder_moved_goes_on_where_it_stopped(self):
+        self.start()
+        moved = os.path.join(self.scratch, "elsewhere")
+        os.rename(self.book, moved)
+        os.chdir(moved)
+        _status, called = self.start()
+        self.assertEqual(called, ["resume", self.session])
+        kept = os.path.join(moved, ".book-editor/codex", self.name)
+        self.assertEqual(os.readlink(self.link), kept)
+        self.assertTrue(read(kept).endswith("more\n"))
+
+    def test_a_home_that_never_saw_the_conversation_gets_the_link(self):
+        self.start()
+        shutil.rmtree(self.home)
+        _status, called = self.start()
+        self.assertEqual(called, ["resume", self.session])
+        self.assertEqual(os.readlink(self.link), self.kept("codex", self.name))
+
+    def test_a_rollout_codex_put_in_place_of_the_link_moves_in(self):
+        self.start()
+        os.unlink(self.link)
+        with open(self.link, "w") as target:
+            target.write("rewritten\n")
+        _status, called = self.start()
+        self.assertEqual(called, ["resume", self.session])
+        self.assertEqual(read(self.kept("codex", self.name)), "rewritten\nmore\n")
+        self.assertTrue(os.path.islink(self.link))
+
+    def test_a_record_without_a_rollout_starts_a_new_conversation(self):
+        engines.write_session(self.book, "codex", str(uuid.uuid4()))
+        _status, called = self.start()
+        self.assertEqual(called, [])
+        self.assertEqual(read(self.kept("codex", "session")), self.session + "\n")
+
+    def test_a_link_to_a_rollout_that_is_gone_is_removed(self):
+        self.start()
+        os.unlink(self.kept("codex", self.name))
+        os.environ["FAKE_ID"] = str(uuid.uuid4())
+        _status, called = self.start()
+        self.assertEqual(called, [])
+        self.assertFalse(os.path.lexists(self.link))
+
+    def test_what_codex_spawned_is_not_the_conversation(self):
+        self.start(FAKE_SOURCE="subagent")
+        self.assertFalse(os.path.exists(self.kept("codex", "session")))
+
+    def test_a_conversation_codex_does_not_have_open_is_not_ours(self):
+        other = self.rollout(str(uuid.uuid4()))
+        os.utime(other, (time.time() + 60, time.time() + 60))
+        self.start()
+        self.assertEqual(read(self.kept("codex", "session")), self.session + "\n")
+        self.assertFalse(os.path.islink(other))
+
+    def test_of_the_conversations_open_the_one_written_last_counts(self):
+        first, last = str(uuid.uuid4()), str(uuid.uuid4())
+        paths = [self.rollout(first), self.rollout(last), self.rollout(self.session)]
+        os.utime(paths[0], (100, 100))
+        os.utime(paths[1], (300, 300))
+        os.utime(paths[2], (200, 200))
+        with contextlib.ExitStack() as held:
+            for path in paths:
+                held.enter_context(open(path, "a"))
+            self.assertEqual(engines.current_codex(os.getpid()), last)
+        self.assertIsNone(engines.current_codex(os.getpid()))
+
+    def test_what_a_child_of_codex_has_open_counts_as_well(self):
+        path = self.rollout(self.session)
+        script = 'exec 3>>"$1"; sleep 30 & echo; wait'
+        with subprocess.Popen(
+            ["/bin/sh", "-c", script, "sh", path],
+            stdout=subprocess.PIPE,
+            start_new_session=True,
+        ) as child:
+            try:
+                child.stdout.readline()  # the grandchild runs, the rollout open
+                self.assertEqual(engines.current_codex(child.pid), self.session)
+                self.assertEqual(len(engines.family(child.pid)), 2)
+            finally:
+                os.killpg(child.pid, signal.SIGKILL)
+
+    def test_a_rollout_without_a_header_is_passed_over(self):
+        path = self.rollout(self.session)
+        for text in ("", "not json\n", "[]\n", '{"type": "other"}\n'):
+            with open(path, "w") as target:
+                target.write(text)
+                target.flush()
+                self.assertEqual(engines.rollout_header(path), {})
+                self.assertIsNone(engines.current_codex(os.getpid()))
+
+    def test_a_rollout_named_for_another_conversation_is_passed_over(self):
+        path = self.rollout(self.session)
+        header = {"type": "session_meta"}
+        header["payload"] = {"id": str(uuid.uuid4()), "thread_source": "user"}
+        with open(path, "w") as target:
+            target.write(json.dumps(header) + "\n")
+            target.flush()
+            self.assertIsNone(engines.current_codex(os.getpid()))
+
+    def test_the_editors_tools_come_as_a_server_of_codex(self):
+        _status, called = self.start(BOOK_EDITOR_SOCKET='/run/a "b"/socket')
+        server = os.path.join(engines.TOOLS_DIR, "book-mcp")
+        self.assertEqual(
+            called,
+            [
+                "-c",
+                f'mcp_servers.book_editor.command="{server}"',
+                "-c",
+                'mcp_servers.book_editor.env={BOOK_EDITOR_SOCKET="/run/a \\"b\\"/socket"}',
+            ],
+        )
+        self.assertTrue(os.access(server, os.X_OK))
+
+    def test_resuming_keeps_the_tools_and_more_arguments(self):
+        self.start()
+        _status, called = self.start("--search", BOOK_EDITOR_SOCKET="/run/socket")
+        self.assertEqual(called[0], "resume")
+        self.assertEqual(called[-2:], [self.session, "--search"])
+        self.assertEqual(len(called), 7)
+
+    def test_a_second_agent_on_the_folder_gets_a_conversation_of_its_own(self):
+        self.start()
+        other = str(uuid.uuid4())
+        with self.another_agent("codex"):
+            _status, called = self.start(FAKE_ID=other)
+        self.assertEqual(called, [])
+        self.assertEqual(read(self.kept("codex", "session")), self.session + "\n")
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes anywhere")
+    def test_a_home_that_takes_no_link_gets_a_new_conversation(self):
+        self.start()
+        os.unlink(self.link)
+        os.chmod(os.path.dirname(self.link), 0o500)
+        self.addCleanup(os.chmod, os.path.dirname(self.link), 0o700)
+        _status, called = self.start(FAKE_ID=str(uuid.uuid4()))
+        self.assertEqual(called, [])
+
+
+class CommandTest(EngineCase):
+    def test_a_command_on_the_path_is_taken_as_named(self):
+        self.assertEqual(engines.find_command("sh"), "sh")
+
+    def test_a_path_is_taken_as_given(self):
+        self.assertEqual(engines.find_command("/nowhere/claude"), "/nowhere/claude")
+
+    def test_a_users_own_install_is_found_off_the_path(self):
+        local = os.path.join(os.environ["HOME"], ".local", "bin")
+        os.makedirs(local)
+        shutil.copy(os.environ["BOOK_CLAUDE"], os.path.join(local, "claude-of-mine"))
+        self.assertEqual(
+            engines.find_command("claude-of-mine"),
+            os.path.join(local, "claude-of-mine"),
+        )
+
+    def test_a_command_found_nowhere_is_left_to_fail_by_name(self):
+        self.assertEqual(engines.find_command("claude-of-nobody"), "claude-of-nobody")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,124 +1,12 @@
 #!/usr/bin/python3
-"""Claude Code for the editor's terminal pane.
+"""book-agent: the agent engine of the editor's terminal pane, continuing the
+folder's conversation. See book_panes/engines.py."""
 
-Each book folder keeps its own conversation, continued on the next start. A
-second pane on the same folder gets a separate conversation.
-
-Environment:
-  BOOK_CLAUDE  the claude command (default: claude)
-"""
-
-import fcntl
-import glob
-import hashlib
 import os
 import sys
-import time
-import uuid
 
-PROMPT = (
-    "You run in the terminal pane of a book editor; the writer works in the "
-    "editor pane beside you, on a file of this folder. `book-view` prints the "
-    "text open there, including edits not saved yet; `book-view --status` "
-    "names the file, the cursor and the selection; `book-view --selection` "
-    "prints the selected passage. `book-edit` changes the open text in place, "
-    "undoable in the editor (see `book-edit --help`). For the open file use "
-    "these rather than the file on disk; edit other files on disk as usual."
-)
-LOCK_SECONDS = 2.0  # the lock is held for an instant; longer means a stuck holder
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
+from book_panes.engines import main
 
-def folder_state():
-    """Folder holding this book folder's state; None when it cannot exist."""
-    home = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    key = hashlib.sha256(os.fsencode(os.path.realpath(os.getcwd()))).hexdigest()
-    state = os.path.join(home, "book-editor", "sessions", key)
-    try:
-        os.makedirs(state, mode=0o700, exist_ok=True)
-    except OSError:
-        return None
-    return state
-
-
-def process_runs(pid):
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, OverflowError):
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def claim(state):
-    """Record this process as the user of the folder's conversation. False
-    when another running agent holds it, or the state stays locked."""
-    with open(os.path.join(state, "lock"), "w") as guard:
-        end = time.monotonic() + LOCK_SECONDS
-        while True:
-            try:
-                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() > end:
-                    return False
-                time.sleep(0.05)
-        path = os.path.join(state, "pid")
-        try:
-            with open(path, encoding="ascii") as source:
-                owner = int(source.read())
-        except (OSError, ValueError):
-            owner = 0
-        if owner > 0 and owner != os.getpid() and process_runs(owner):
-            return False
-        with open(path, "w", encoding="ascii") as target:
-            target.write(f"{os.getpid()}\n")  # still ours after exec
-        return True
-
-
-def stored_session(state):
-    try:
-        with open(os.path.join(state, "session"), encoding="ascii") as source:
-            return str(uuid.UUID(source.read().strip()))
-    except (OSError, ValueError):
-        return None
-
-
-def has_transcript(session):
-    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    pattern = os.path.join(glob.escape(config), "projects", "*", session + ".jsonl")
-    return bool(glob.glob(pattern))
-
-
-def session_arguments():
-    """Arguments that continue the folder's conversation or start it."""
-    state = folder_state()
-    try:
-        if state is None or not claim(state):
-            return []
-        session = stored_session(state)
-        if session is not None and has_transcript(session):
-            return ["--resume", session]
-        # never reuse an id: claude refuses one that is taken
-        session = str(uuid.uuid4())
-        with open(os.path.join(state, "session"), "w", encoding="ascii") as target:
-            target.write(session + "\n")
-        return ["--session-id", session]
-    except OSError:
-        return []  # no state, no memory of the conversation
-
-
-def main():
-    claude = os.environ.get("BOOK_CLAUDE") or "claude"
-    arguments = ["--append-system-prompt", PROMPT, *session_arguments(), *sys.argv[1:]]
-    try:
-        os.execvp(claude, [claude, *arguments])
-    except OSError as error:
-        print(f"book-agent: cannot run {claude}: {error.strerror}", file=sys.stderr)
-        print("Set BOOK_AGENT_CMD to the agent command to use.", file=sys.stderr)
-        return 127
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+sys.exit(main())

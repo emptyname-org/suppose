@@ -1,0 +1,11 @@
+#!/usr/bin/python3
+"""book-mcp: the editor's view and edit as MCP tools. See book_panes/mcp.py."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+from book_panes.mcp import main
+
+sys.exit(main())

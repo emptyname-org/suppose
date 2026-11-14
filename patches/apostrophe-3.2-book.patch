@@ -1,6 +1,11 @@
 --- a/bin/apostrophe
 +++ b/bin/apostrophe
-@@ -36,8 +36,10 @@
+@@ -32,12 +32,14 @@
+     # In the local use case the installed schemas go in <builddir>/data
+     os.environ["XDG_DATA_DIRS"] = ':' + os.environ.get("XDG_DATA_DIRS", "")
+ 
+-from gi.repository import Gio
++from gi.repository import Gio, GLib
  
  import apostrophe
  
@@ -13,6 +18,19 @@
  
  # L10n
  locale.textdomain('apostrophe')
+@@ -48,8 +50,11 @@
+ 
+ def run_application():
+     from apostrophe.application import Application
++    import book_panes
+ 
+-    app = Application('org.gnome.gitlab.somas.Apostrophe')
++    # book panes: windows, desktop entry and icon go by the editor's own id
++    GLib.set_prgname(book_panes.APP_ID)
++    app = Application(book_panes.APP_ID)
+     return app.run(sys.argv)
+ 
+ 
 --- a/lib/python3/dist-packages/apostrophe/config.py
 +++ b/lib/python3/dist-packages/apostrophe/config.py
 @@ -1,5 +1,10 @@

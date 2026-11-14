@@ -7,8 +7,10 @@ agent reads and edits the open text through the editor channel.
 Environment:
   BOOK_ROOT         folder shown in the tree and used as the agent's cwd
                     (default: current directory)
-  BOOK_AGENT_CMD    shell command run in the terminal (default: claude)
-  BOOK_AGENT_TITLE  title of the terminal pane (default: Agent)
+  BOOK_AGENT_CMD    shell command run in the terminal in place of the agent
+                    engines (see engines.py)
+  BOOK_AGENT_TITLE  title of the terminal pane with BOOK_AGENT_CMD
+                    (default: Agent)
 """
 
 import os
@@ -22,7 +24,7 @@ gi.require_version("Vte", "3.91")
 from apostrophe import config
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango, Vte
 
-from . import agents, channel
+from . import APP_ID, agents, channel, engines
 from .folders import (
     ATTRIBUTES,
     FolderListing,
@@ -87,6 +89,37 @@ LAUNCHER_PATH_VARS = (
     "XDG_DATA_DIRS",
     "GSETTINGS_SCHEMA_DIR",
 )
+
+
+def state_file(name):
+    home = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(home, "book-editor", name)
+
+
+def remember_folder(path):
+    """The launcher opens this folder when it is started without one."""
+    target = state_file("last-folder")
+    try:
+        os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+        partial = f"{target}.{os.getpid()}"
+        with open(partial, "w", encoding="utf-8") as record:
+            record.write(path + "\n")
+        os.replace(partial, target)
+    except (OSError, ValueError):
+        pass  # then the launcher asks
+
+
+def launch_editor(folder):
+    """Start another editor on the folder, a process of its own."""
+    changed, removed = agent_environment(os.environ, None)
+    dropped = {*removed, "BOOK_ROOT", engines.ENGINE_ENV}
+    environ = {name: value for name, value in os.environ.items() if name not in dropped}
+    environ.update(changed)
+    GLib.spawn_async(
+        [os.path.join(TOOLS_DIR, "book-editor"), folder],
+        envp=[f"{name}={value}" for name, value in environ.items()],
+        flags=GLib.SpawnFlags.DEFAULT,
+    )
 
 
 def rgba(spec):
@@ -186,7 +219,10 @@ class BookPanes:
         self.root = Gio.File.new_for_path(
             os.path.abspath(os.environ.get("BOOK_ROOT") or os.getcwd())
         )
-        self.command = os.environ.get("BOOK_AGENT_CMD") or "claude"
+        # a command of the user's own, or None: one of the agent engines
+        self.command = os.environ.get("BOOK_AGENT_CMD") or None
+        self.engine = engines.chosen_engine(self.root.get_path())
+        self.running_engine = None  # the one the agent was started with
         self.agent = None  # the running one
         self.spawning = None  # cancellable of a start under way
         self.restart_pending = False  # the agent was told to go, start anew
@@ -199,6 +235,8 @@ class BookPanes:
         self.saved_accels = None
         self.listings = {}  # folder uri -> FolderListing, for every folder shown
 
+        Gtk.Window.set_default_icon_name(APP_ID)
+        remember_folder(self.root.get_path())
         self._install_css()
         self.tree_pane = self._build_tree()
         self.agent_pane = self._build_agent()
@@ -254,9 +292,44 @@ class BookPanes:
             child=self.list_view, hscrollbar_policy=Gtk.PolicyType.NEVER
         )
         title = self.root.get_basename() or self.root.get_path()
-        pane, _header = self._pane(title, scroller, True, False)
+        pane, header = self._pane(title, scroller, True, False)
         pane.set_size_request(160, -1)
+
+        other = Gtk.Button(icon_name="folder-open-symbolic")
+        other.set_tooltip_text("Open another folder")
+        other.connect("clicked", lambda *_: self.choose_folder())
+        header.pack_end(other)
         return pane
+
+    def choose_folder(self):
+        dialog = Gtk.FileDialog(title="Open Folder", modal=True)
+        parent = self.root.get_parent()
+        if parent is not None:
+            dialog.set_initial_folder(parent)
+        dialog.select_folder(self.window, None, self._on_folder_chosen)
+
+    def _on_folder_chosen(self, dialog, result):
+        try:
+            folder = dialog.select_folder_finish(result)
+        except GLib.GError:
+            return  # dismissed
+        self.open_folder(folder)
+
+    def open_folder(self, folder):
+        """Another editor takes the folder, this window closes: its edits
+        are saved, its agent ends, its conversation stays with its folder."""
+        path = folder.get_path()
+        if path is None or not os.path.isdir(path):
+            self.window.get_display().beep()
+            return
+        if os.path.realpath(path) == os.path.realpath(self.root.get_path()):
+            return
+        try:
+            launch_editor(path)
+        except GLib.GError:
+            self.window.get_display().beep()  # this window stays
+            return
+        self.window.close()
 
     def _build_agent(self):
         terminal = Vte.Terminal()
@@ -284,6 +357,16 @@ class BookPanes:
         title = os.environ.get("BOOK_AGENT_TITLE") or "Agent"
         pane, header = self._pane(title, terminal, False, True)
         pane.set_size_request(AGENT_MIN_WIDTH, -1)
+        self.engine_choice = None
+        if self.command is None:
+            names = list(engines.ENGINES)
+            choice = Gtk.DropDown.new_from_strings(list(engines.ENGINES.values()))
+            choice.set_selected(names.index(self.engine))
+            choice.set_tooltip_text("Agent engine")
+            choice.add_css_class("flat")
+            choice.connect("notify::selected", self._on_engine_chosen)
+            header.set_title_widget(choice)
+            self.engine_choice = choice
 
         send = Gtk.Button(icon_name="mail-send-symbolic")
         send.set_tooltip_text("Send the open file and selection to the agent")
@@ -725,12 +808,17 @@ class BookPanes:
         argv = ["/usr/bin/env"]
         for name in removed:
             argv += ["-u", name]
+        command = self.command
+        if command is None:
+            command = GLib.shell_quote(os.path.join(TOOLS_DIR, "book-agent"))
+            changed[engines.ENGINE_ENV] = self.engine
+            self.running_engine = self.engine
         self.spawning = Gio.Cancellable()
         STARTING.add(self)
         self.terminal.spawn_async(
             Vte.PtyFlags.DEFAULT,
             self.root.get_path(),
-            argv + ["/bin/sh", "-c", self.command],
+            argv + ["/bin/sh", "-c", command],
             [name + "=" + value for name, value in changed.items()],
             GLib.SpawnFlags.DEFAULT,
             None,
@@ -757,8 +845,10 @@ class BookPanes:
             return
         if self.closed:
             end_agent(agent)  # the window went away meanwhile
-        else:
-            self.agent = agent
+            return
+        self.agent = agent
+        if self.command is None and self.running_engine != self.engine:
+            self.restart()  # another engine was chosen while this one started
 
     @property
     def child_pid(self):
@@ -776,6 +866,21 @@ class BookPanes:
             self._spawn()
         else:
             self._notice("session ended, press Restart to start it again")
+
+    def _on_engine_chosen(self, choice, _property):
+        self.set_engine(list(engines.ENGINES)[choice.get_selected()])
+
+    def set_engine(self, name):
+        """Run the folder's conversation with another engine from now on."""
+        if name == self.engine or name not in engines.ENGINES:
+            return
+        self.engine = name
+        if not engines.choose_engine(self.root.get_path(), name):
+            self._notice("the folder keeps no record of the choice")
+        if self.engine_choice is not None:
+            self.engine_choice.set_selected(list(engines.ENGINES).index(name))
+        if self.command is None:
+            self.restart()  # a start under way is redone when it reports
 
     def _notice(self, text):
         self.terminal.feed(("\r\n\x1b[2m[" + text + "]\x1b[0m\r\n").encode())
