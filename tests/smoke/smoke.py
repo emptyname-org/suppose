@@ -28,7 +28,7 @@ Gio.Resource._register(
 from apostrophe import helpers  # after the resources: it loads widgets
 from apostrophe.application import Application
 
-from book_panes import channel, folders, panes
+from book_panes import agents, channel, folders, panes
 
 WATCHING = os.environ.get("SMOKE_WATCH") != "0"
 if not WATCHING:  # as with the inotify limit reached
@@ -90,6 +90,15 @@ def runs(pid):
     return True
 
 
+def child_runs(pid):
+    """True while pid is a child of ours that has not exited."""
+    try:
+        flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+        return os.waitid(os.P_PID, pid, flags) is None
+    except ChildProcessError:
+        return False
+
+
 def processes_in(folder):
     """Pids of the processes whose working directory is the folder."""
     found = []
@@ -113,11 +122,11 @@ def shutdown_ends(script):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         start_new_session=True,
-    ) as agent:
+    ) as child:
         for _line in range(script.count("echo ready")):
-            agent.stdout.readline()
+            child.stdout.readline()
         started = time.monotonic()
-        panes.end_agent(agent.pid)
+        panes.end_agent(agents.Agent(child.pid))
         panes.on_shutdown()
         taken = time.monotonic() - started
         left = processes_in(folder)
@@ -131,8 +140,8 @@ def shutdown_ends(script):
 
 def check_shutdown():
     """What the shutdown handler does with the agents hung up before it."""
-    patience = panes.KILL_AFTER_MS
-    panes.KILL_AFTER_MS = 500
+    patience = agents.KILL_AFTER_SECONDS
+    agents.KILL_AFTER_SECONDS = 0.5
     taken, left = shutdown_ends("exec cat")
     check("shutdown: an agent that goes is not waited for", taken < 0.4 and not left)
     taken, left = shutdown_ends("trap '' HUP; echo ready; exec cat")
@@ -140,7 +149,8 @@ def check_shutdown():
     check("shutdown: after the time it was given", taken >= 0.4)
     taken, left = shutdown_ends("(trap '' HUP; echo ready; exec sleep 300) & exec cat")
     check("shutdown: what an agent that went left behind is killed", not left)
-    panes.KILL_AFTER_MS = patience
+    check("shutdown: no agent is held any longer", not agents.ENDING)
+    agents.KILL_AFTER_SECONDS = patience
 
 
 def start_tool(book, *argv, stdin=None):
@@ -540,7 +550,7 @@ def scenario(app):
     book.restart()
     yield 1500
     stubborn = book.child_pid
-    panes.KILL_AFTER_MS = 500
+    agents.KILL_AFTER_SECONDS = 0.5
     book.command = command
     book.restart()
     yield 300
@@ -566,6 +576,29 @@ def scenario(app):
     check(
         "restart: what the old agent left behind is killed",
         processes_in(BOOK) == [book.child_pid] and len(spawned) == 5,
+    )
+    # an agent that cannot be held is not kept
+    hold = agents.Agent
+
+    def no_descriptor(_pid):
+        raise OSError(24, "Too many open files")
+
+    agents.Agent = no_descriptor
+    book.restart()
+    yield 1500
+    agents.Agent = hold
+    check(
+        "restart: an agent that cannot be held is killed",
+        book.child_pid is None
+        and len(spawned) == 6
+        and not processes_in(BOOK)
+        and "Too many open files" in terminal_text(book),
+    )
+    book.restart()
+    yield 1500
+    check(
+        "restart: the next one is held again",
+        processes_in(BOOK) == [book.child_pid] and len(spawned) == 7,
     )
     STATE["pid"] = book.child_pid
 
@@ -650,17 +683,18 @@ def main():
         and not os.path.exists(os.path.dirname(STATE["socket"])),
     )
     pid = STATE.get("pid")
-    check(
-        "close: agent process ended",
-        isinstance(pid, int) and not panes.agent_runs(pid),
-    )
     left = processes_in(BOOK)
     for _attempt in range(20):
         if not left:
             break
         GLib.usleep(100000)
         left = processes_in(BOOK)
+    check(
+        "close: agent process ended",
+        isinstance(pid, int) and not child_runs(pid),
+    )
     check("close: no process left in the book folder", not left)
+    check("close: no agent is held any longer", not agents.ENDING)
     print(f"{len(FAILED)} failed")
     return 1 if FAILED else 0
 

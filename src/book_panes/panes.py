@@ -12,7 +12,6 @@ Environment:
 """
 
 import os
-import signal
 import time
 
 import gi
@@ -23,7 +22,7 @@ gi.require_version("Vte", "3.91")
 from apostrophe import config
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango, Vte
 
-from . import channel
+from . import agents, channel
 from .folders import (
     ATTRIBUTES,
     FolderListing,
@@ -39,7 +38,6 @@ DISK_POLL_SECONDS = 1
 TREE_POLL_SECONDS = 2
 BUSY_RETRY_MS = 100
 BUSY_RETRIES = 50
-KILL_AFTER_MS = 5000  # an agent that ignores the hangup is killed
 START_WAIT_SECONDS = 2.0  # shutdown: for agent starts under way to report
 TREE_WIDTH = 240
 EDITOR_MIN_WIDTH = 420
@@ -136,71 +134,20 @@ def agent_environment(environ, socket_path):
     return changed, removed
 
 
-def signal_agent(pid, signum):
-    """Signal the agent's process group, or the agent alone when it has left
-    the group. False when there is nothing to signal."""
-    for send in (os.killpg, os.kill):
-        try:
-            send(pid, signum)
-        except (ProcessLookupError, PermissionError):
-            continue
-        return True
-    return False
-
-
-def agent_runs(pid):
-    """True while pid is a child of ours that has not exited. It is not
-    reaped here, so a pid that says True is never a reused one."""
-    try:
-        flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
-        return os.waitid(os.P_PID, pid, flags) is None
-    except ChildProcessError:
-        return False
-
-
-def group_exists(pid):
-    """True while the agent's process group has a member: the agent or what
-    it started."""
-    try:
-        os.killpg(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 OPEN_PANES: set["BookPanes"] = set()  # of windows not closed yet
 STARTING: set["BookPanes"] = set()  # with an agent start under way
-# agents hung up, with what they started: pid -> time.monotonic() to kill
-ENDING: dict[int, float] = {}
 
 
-def end_agent(pid):
-    """Hang up the agent and what it started. What is left of them when the
-    time is up is killed. False when there is nothing to hang up."""
-    if not signal_agent(pid, signal.SIGHUP):
-        return False
-    ENDING[pid] = time.monotonic() + KILL_AFTER_MS / 1000
-    GLib.timeout_add(KILL_AFTER_MS, kill_ending, pid)
-    return True
+def end_agent(agent):
+    """Hang up the agent and what it started; what is left of them when the
+    time is up is killed."""
+    if agents.end(agent):
+        patience = int(agents.KILL_AFTER_SECONDS * 1000)
+        GLib.timeout_add(patience, kill_ending, agent)
 
 
-def kill_agent(pid):
-    """Kill the agent's process group, and the agent itself should it have
-    moved to another group. The group id is the agent's pid; pids are handed
-    out in a cycle, so seconds after the hangup it is not yet another's."""
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-    if agent_runs(pid):
-        os.kill(pid, signal.SIGKILL)
-
-
-def kill_ending(pid):
-    if ENDING.pop(pid, None) is not None:
-        kill_agent(pid)
+def kill_ending(agent):
+    agents.kill_due(agent)
     return GLib.SOURCE_REMOVE
 
 
@@ -215,20 +162,7 @@ def on_shutdown(*_args):
     while STARTING and time.monotonic() < patience:
         if not context.iteration(False):
             time.sleep(0.01)
-    while ENDING:
-        now = time.monotonic()
-        for pid, deadline in list(ENDING.items()):
-            try:  # nobody else collects an agent that exited from here on
-                os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                pass
-            if not group_exists(pid):
-                del ENDING[pid]
-            elif now >= deadline:
-                kill_agent(pid)
-                del ENDING[pid]
-        if ENDING:
-            time.sleep(0.05)
+    agents.wait_for_ending()
 
 
 def position(text_iter):
@@ -253,7 +187,7 @@ class BookPanes:
             os.path.abspath(os.environ.get("BOOK_ROOT") or os.getcwd())
         )
         self.command = os.environ.get("BOOK_AGENT_CMD") or "claude"
-        self.child_pid = None  # the running agent
+        self.agent = None  # the running one
         self.spawning = None  # cancellable of a start under way
         self.restart_pending = False  # the agent was told to go, start anew
         self.closed = False
@@ -533,9 +467,9 @@ class BookPanes:
         self.restart_pending = False
         if self.spawning is not None:
             self.spawning.cancel()  # _on_spawned ends one that still starts
-        if self.child_pid is not None:
-            end_agent(self.child_pid)
-            self.child_pid = None
+        if self.agent is not None:
+            end_agent(self.agent)
+            self.agent = None
 
     def _buffer_matches_file(self):
         window = self.window
@@ -813,13 +747,27 @@ class BookPanes:
             if not self.closed:
                 message = error.message if error is not None else "spawn failed"
                 self._notice("could not start the agent: " + message)
-        elif self.closed:
-            end_agent(pid)  # the window went away meanwhile
+            return
+        try:
+            agent = agents.Agent(pid)
+        except OSError as failure:  # no descriptor to be had
+            agents.refuse(pid)  # not to be held, so not to be kept
+            if not self.closed:
+                self._notice(f"could not start the agent: {failure}")
+            return
+        if self.closed:
+            end_agent(agent)  # the window went away meanwhile
         else:
-            self.child_pid = pid
+            self.agent = agent
+
+    @property
+    def child_pid(self):
+        return None if self.agent is None else self.agent.pid
 
     def _on_child_exited(self, _terminal, _status):
-        self.child_pid = None
+        agent, self.agent = self.agent, None
+        if agent is not None and agent not in agents.ENDING:
+            agent.close()  # went by itself, or is dealt with already
         if self.closed:
             return
         if self.restart_pending:
@@ -835,9 +783,9 @@ class BookPanes:
     def restart(self):
         if self.spawning is not None or self.restart_pending:
             return  # a new agent is on its way
-        if self.child_pid is not None:
+        if self.agent is not None:
             self.restart_pending = True  # started when this one's exit is told
-            end_agent(self.child_pid)
+            end_agent(self.agent)
             return
         self.terminal.reset(True, True)
         self._spawn()
