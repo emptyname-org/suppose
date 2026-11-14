@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Book Editor
+Comment=Write a book with an AI agent beside the text
+Exec=book-editor %f
+Icon=io.github.emptyname_org.BookEditor
+Terminal=false
+Categories=Office;TextEditor;
+MimeType=inode/directory;text/markdown;
+StartupWMClass=io.github.emptyname_org.BookEditor
+StartupNotify=true
