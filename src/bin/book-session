@@ -1,6 +1,6 @@
 #!/usr/bin/python3
-"""book-session FOLDER: Claude Code's hook that tells the folder which
-conversation the agent opened. See book_panes/engines.py."""
+"""book-session REPORT: Claude Code's hook that tells the agent running it
+which conversation it opened. See book_panes/engines.py."""
 
 import os
 import sys

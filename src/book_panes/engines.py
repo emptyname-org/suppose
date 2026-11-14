@@ -7,17 +7,21 @@ where it stopped.
     .book-editor/engine            the engine chosen
     .book-editor/claude/session    id of the conversation
     .book-editor/claude/ID.jsonl   its transcript; Claude Code resumes by path
+    .book-editor/claude/ID/        copy of what Claude Code keeps beside it
     .book-editor/codex/session
     .book-editor/codex/rollout-…-ID.jsonl
                                    Codex resumes by id; its home holds a link
 
 The conversation is the one the engine had open last: /clear, /new and
-/resume in the engine change it. Claude Code tells through a hook, Codex
-shows by the rollout it keeps open.
+/resume in the engine change it. Only the engine's own word counts for
+that. Claude Code tells through a hook, which reports to the agent that
+runs it. Codex shows by the rollouts it keeps open, looked at every
+WATCH_SECONDS: what it opens later than the last look before its end is
+not followed, the folder then goes on with the conversation before.
 
-A copy of a folder has the conversations of its original. Claude Code goes
-on in each on its own; Codex knows a conversation by its id alone, so the
-copy waits for the original's agent to end before it takes the id over.
+An agent holds a lock on each conversation it uses. A copy of a folder has
+the conversations of its original; while an agent of the original runs,
+the copy's agent runs off the record, with a conversation of its own.
 
 Environment:
   BOOK_ENGINE   engine to run (default: the folder's choice, else claude)
@@ -37,7 +41,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import time
 import uuid
 
 STATE_DIR = ".book-editor"
@@ -49,8 +52,7 @@ SOCKET_ENV = "BOOK_EDITOR_SOCKET"
 TOOLS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"
 )
-WATCH_SECONDS = 1.0  # between looks at the conversation Codex has open
-CLOCK_SLACK = 0.1  # a file's time may lag the clock's by a tick
+WATCH_SECONDS = 0.25  # between looks at what the engine opened
 MAX_HEADER_BYTES = 4 * 1024 * 1024
 ROLLOUT = re.compile(
     r"rollout-(\d{4})-(\d{2})-(\d{2})T[0-9-]+?-"
@@ -114,17 +116,10 @@ def write_word(folder, name, word):
             os.unlink(partial)
 
 
-def take_over(source, target):
-    """Move a file, also to another filesystem. The target is there whole
-    or not at all; the source goes once it is."""
-    try:
-        os.rename(source, target)
-        return
-    except OSError as error:
-        if error.errno != errno.EXDEV:
-            raise
+def copy_whole(source, target):
+    """Copy a file; the target is there whole or not at all."""
     for stale in glob.glob(glob.escape(target) + ".*.part"):
-        os.unlink(stale)  # of a move that did not end
+        os.unlink(stale)  # of a copy that did not end
     partial = f"{target}.{os.getpid()}.part"
     try:
         copy = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -137,23 +132,42 @@ def take_over(source, target):
     finally:
         if os.path.lexists(partial):
             os.unlink(partial)
+
+
+def take_over(source, target):
+    """Move a file, also to another filesystem; the source goes once the
+    target is there whole."""
+    try:
+        os.rename(source, target)
+        return
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+    copy_whole(source, target)
     os.unlink(source)
 
 
-def take_over_folder(source, target):
-    """Move what a folder holds into another, file by file. What the other
-    has already stays where it is, in both."""
-    for directory, _folders, names in os.walk(source, topdown=False):
+def copy_newer(source, target):
+    """Copy what a folder holds into another, each file whole. A file the
+    other has as large and as new stays; nothing is taken away."""
+    for directory, _folders, names in os.walk(source):
         inside = os.path.relpath(directory, source)
         for name in names:
+            origin = os.path.join(directory, name)
             goal = os.path.normpath(os.path.join(target, inside, name))
-            if not os.path.lexists(goal):
+            if os.path.islink(origin) or not os.path.isfile(origin):
+                continue
+            here = os.stat(origin)
+            try:
+                there = os.stat(goal)
+            except FileNotFoundError:
+                there = None
+            if there is None or (there.st_size, there.st_mtime) != (
+                here.st_size,
+                max(here.st_mtime, there.st_mtime),
+            ):
                 os.makedirs(os.path.dirname(goal), mode=0o700, exist_ok=True)
-                take_over(os.path.join(directory, name), goal)
-        try:
-            os.rmdir(directory)
-        except OSError:
-            pass  # something stays in it
+                copy_whole(origin, goal)
 
 
 def chosen_engine(folder):
@@ -211,16 +225,43 @@ def hold(*parts):
     return guard
 
 
+def claim_file(folder, engine, name):
+    """A file of the agent that has the folder's conversation with the
+    engine; this machine's, not the folder's."""
+    return os.path.join(
+        state_home(), "book-editor", "claims", folder_key(folder), engine, name
+    )
+
+
 def claim(folder, engine):
     """Take the folder's conversation with the engine for this process,
     while the engine runs. None when another agent has it."""
     return hold(folder_key(folder), engine, "lock")
 
 
-def hold_session(engine, session):
-    """Take a conversation the engine knows by its id alone, whichever
-    folder has it. None when an agent of another folder has it."""
-    return hold(engine, session)
+class Held:
+    """The conversations this agent uses, each under a lock that no agent
+    of another folder gets meanwhile."""
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.guards = {}
+
+    def take(self, session):
+        if session not in self.guards:
+            guard = hold(self.engine, session)
+            if guard is None:
+                return False
+            self.guards[session] = guard
+        return True
+
+    def __contains__(self, session):
+        return session in self.guards
+
+    def close(self):
+        for guard in self.guards.values():
+            os.close(guard)
+        self.guards.clear()
 
 
 # ---- Claude Code -----------------------------------------------------------
@@ -244,59 +285,136 @@ def earlier_session(folder):
         return None
 
 
+def claude_home(folder):
+    """The folder in Claude Code's home it keeps the folder's conversations
+    in, as it told; None when it did not."""
+    word = read_word(claim_file(folder, "claude", "home"))
+    return word if word and os.path.isdir(word) else None
+
+
+def note_home(folder, home):
+    try:
+        with open(claim_file(folder, "claude", "home"), "w", encoding="utf-8") as note:
+            note.write(home + "\n")
+    except (OSError, ValueError):
+        pass  # then it is looked for
+
+
 def adopt_claude(folder, session):
-    """Move what Claude Code wrote into its own home for the conversation
-    to the folder: the transcript, and what it set aside beside it, which
-    it goes on doing there. True when the folder has the transcript."""
+    """Bring the conversation Claude Code keeps in its home to the folder.
+    The transcript moves; what Claude Code sets aside beside it, and goes
+    on using there, the folder gets a copy of. True when the folder has the
+    transcript. The caller holds the conversation."""
     target = claude_transcript(folder, session)
-    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    projects = os.path.join(glob.escape(config), "projects", "*")
+    home = claude_home(folder)
     if not os.path.isfile(target):
-        found = glob.glob(os.path.join(projects, session + ".jsonl"))
-        if not found:
-            return False
+        source = os.path.join(home or "", session + ".jsonl")
+        if home is None or not os.path.isfile(source):
+            config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser(
+                "~/.claude"
+            )
+            found = glob.glob(
+                os.path.join(glob.escape(config), "projects", "*", session + ".jsonl")
+            )
+            if not found:
+                return False
+            source = max(found, key=os.path.getmtime)
+            home = os.path.dirname(source)
+            note_home(folder, home)
         record_folder(folder, "claude")
-        take_over(max(found, key=os.path.getmtime), target)
-    for beside in glob.glob(os.path.join(projects, session)):
-        if os.path.isdir(beside) and not os.path.islink(beside):
-            take_over_folder(beside, target.removesuffix(".jsonl"))
+        take_over(source, target)
+    beside = os.path.join(home or "", session)
+    if home is not None and os.path.isdir(beside) and not os.path.islink(beside):
+        copy_newer(beside, target.removesuffix(".jsonl"))
     return True
 
 
-def claude_settings(folder):
+def claude_settings(report):
     """Settings that make Claude Code tell which conversation it opens, at
     its start and after /clear and /resume: its SessionStart hook."""
-    command = shlex.join([os.path.join(TOOLS_DIR, "book-session"), folder])
+    command = shlex.join([os.path.join(TOOLS_DIR, "book-session"), report])
     hook = {"hooks": [{"type": "command", "command": command}]}
     return json.dumps({"hooks": {"SessionStart": [hook]}})
 
 
-def note_claude(folder, source):
-    """The hook: record the conversation Claude Code says it opened."""
+def report_claude(report, source):
+    """The hook: pass what Claude Code says it opened on to the agent that
+    runs it, a line in that agent's file. Without the agent, nothing."""
     try:
-        session = str(uuid.UUID(json.load(source)["session_id"]))
-    except (ValueError, KeyError, TypeError, AttributeError):
+        told = json.load(source)
+        line = json.dumps(
+            {"session": told["session_id"], "transcript": told.get("transcript_path")}
+        )
+        target = os.open(report, os.O_WRONLY | os.O_APPEND)
+    except (ValueError, KeyError, TypeError, AttributeError, OSError):
         return
     try:
-        if session != read_session(folder, "claude"):
-            write_session(folder, "claude", session)
+        os.write(target, (line + "\n").encode())
     except OSError:
-        pass  # the conversation goes on; the folder keeps the one before
+        pass
+    finally:
+        os.close(target)
 
 
-def claude_arguments(folder):
-    """Arguments that continue the folder's conversation or start it."""
+def last_report(report):
+    """What Claude Code told last: the id of the conversation, and the
+    folder in its home it keeps it in or None. None when it told nothing."""
+    try:
+        with open(report, encoding="utf-8") as source:
+            lines = source.read().splitlines()
+    except (OSError, ValueError):
+        return None
+    for line in reversed(lines):
+        try:
+            told = json.loads(line)
+            session = str(uuid.UUID(told["session"]))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        transcript = told.get("transcript")
+        if (
+            isinstance(transcript, str)
+            and os.path.isabs(transcript)
+            and os.path.basename(transcript) == session + ".jsonl"
+        ):
+            return session, os.path.dirname(transcript)
+        return session, None
+    return None
+
+
+def follow_claude(folder, held, report):
+    """Make what Claude Code told last the folder's conversation, unless an
+    agent of another folder has it."""
+    told = last_report(report)
+    if told is None:
+        return
+    session, home = told
+    if home is not None:
+        note_home(folder, home)
+    if session != read_session(folder, "claude") and held.take(session):
+        write_session(folder, "claude", session)
+
+
+def claude_arguments(folder, held, report):
+    """Arguments that continue the folder's conversation or start it; none
+    when an agent of another folder has it."""
+    for left in glob.glob(glob.escape(claim_file(folder, "claude", "opened.")) + "*"):
+        follow_claude(folder, held, left)  # of an agent that died
+        os.unlink(left)
+    os.close(os.open(report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     recorded = read_session(folder, "claude")
     session = recorded or earlier_session(folder)
-    report = ["--settings", claude_settings(folder)]
+    if session is not None and not held.take(session):
+        return []
+    tell = ["--settings", claude_settings(report)]
     if session is not None and adopt_claude(folder, session):
         if session != recorded:
             write_session(folder, "claude", session)
-        return [*report, "--resume", claude_transcript(folder, session)]
+        return [*tell, "--resume", claude_transcript(folder, session)]
     # never reuse an id: claude refuses one that is taken
     session = str(uuid.uuid4())
+    held.take(session)
     write_session(folder, "claude", session)
-    return [*report, "--session-id", session]
+    return [*tell, "--session-id", session]
 
 
 # ---- Codex -----------------------------------------------------------------
@@ -383,25 +501,17 @@ def rollout_header(path):
 
 def family(pid):
     """The process and what it started, as far as that still has its parent."""
-    children: dict[int, list[int]] = {}
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        try:
-            with open(f"/proc/{name}/stat", "rb") as source:
-                fields = source.read().rpartition(b")")[2].split()
-            children.setdefault(int(fields[1]), []).append(int(name))
-        except (OSError, ValueError, IndexError):
-            continue  # it ended meanwhile
     found, at = [pid], 0
     while at < len(found):
-        found += children.get(found[at], ())
+        tasks = f"/proc/{found[at]}/task"
+        try:
+            for task in os.listdir(tasks):
+                with open(f"{tasks}/{task}/children", encoding="ascii") as source:
+                    found += [int(word) for word in source.read().split()]
+        except (OSError, ValueError):
+            pass  # it ended meanwhile
         at += 1
     return found
-
-
-def processes():
-    return [int(name) for name in os.listdir("/proc") if name.isdigit()]
 
 
 def open_rollouts(members):
@@ -445,33 +555,6 @@ def current_codex(pid):
         except OSError:
             continue
         if session is not None and (current is None or written > latest):
-            latest, current = written, session
-    return current
-
-
-def unseen_codex(folder, since):
-    """Id of the conversation Codex wrote in the folder after the last look
-    at it and before its end: written since the time given, in Codex's
-    home, of this folder, and open in no process any more."""
-    place = os.path.realpath(folder)
-    elsewhere = None
-    latest, current = since - CLOCK_SLACK, None
-    for path in home_rollouts():
-        try:
-            written = os.path.getmtime(path)
-        except OSError:
-            continue
-        if written < latest or os.path.islink(path):
-            continue
-        session = users_rollout(path)
-        cwd = rollout_header(path).get("cwd")
-        if session is None or not isinstance(cwd, str):
-            continue
-        if os.path.realpath(cwd) != place:
-            continue
-        if elsewhere is None:
-            elsewhere = {os.path.realpath(held) for held in open_rollouts(processes())}
-        if os.path.realpath(path) not in elsewhere:
             latest, current = written, session
     return current
 
@@ -540,61 +623,63 @@ def run(argv, watch=None):
 
 
 def run_claude(folder, command, extra, claimed):
-    arguments = []
-    if claimed:
+    start = [command, "--append-system-prompt", CLAUDE_PROMPT]
+    if not claimed:
+        return run([*start, *extra])
+    held = Held("claude")
+    report = claim_file(folder, "claude", f"opened.{os.getpid()}")
+    seen = [0]
+
+    def follow(_pid=None):
         try:
-            arguments = claude_arguments(folder)
+            size = os.stat(report).st_size
+            if size != seen[0]:
+                seen[0] = size
+                follow_claude(folder, held, report)
+        except OSError:
+            pass  # the folder keeps the conversation before
+
+    try:
+        arguments = []
+        try:
+            arguments = claude_arguments(folder, held, report)
         except OSError:
             pass  # no record, no memory of the conversation
-    status = run([command, "--append-system-prompt", CLAUDE_PROMPT, *arguments, *extra])
-    if claimed:
+        status = run([*start, *arguments, *extra], follow)
+        follow()
         try:
             session = read_session(folder, "claude")
-            if session is not None:  # the one started, or opened since
+            if session in held:  # the one resumed or started, or opened since
                 adopt_claude(folder, session)
         except OSError:
             pass  # stays in Claude Code's home, taken over at the next start
-    return status
+        return status
+    finally:
+        held.close()
+        if os.path.lexists(report):
+            os.unlink(report)
 
 
 def run_codex(folder, command, extra, claimed):
     plain = [command, *codex_options(), *extra]
     if not claimed:
         return run(plain)
-    held = {}  # id of a conversation: its lock, for as long as Codex runs
-
-    def ours(session):
-        if session not in held:
-            guard = hold_session("codex", session)
-            if guard is None:
-                return False
-            held[session] = guard
-        return True
-
-    def note(session):
-        """Record the conversation as the folder's, unless it is one the
-        agent of another folder has."""
-        try:
-            if session is None or session == read_session(folder, "codex"):
-                return
-            if ours(session):
-                write_session(folder, "codex", session)
-        except OSError:
-            pass
-
-    looked = [time.time()]
+    held = Held("codex")
 
     def watch(pid):
-        now = time.time()
-        note(current_codex(pid))
-        looked[0] = now
+        try:
+            session = current_codex(pid)
+            if session is None or session == read_session(folder, "codex"):
+                return
+            if held.take(session):
+                write_session(folder, "codex", session)
+        except OSError:
+            pass  # the folder keeps the conversation before
 
     try:
         session = read_session(folder, "codex")
-        if session is not None and not ours(session):
-            # the folder is a copy and the original's agent runs: a
-            # conversation of its own, off the record, until that one ends
-            return run(plain)
+        if session is not None and not held.take(session):
+            return run(plain)  # an agent of the folder's original has it
         argv = plain
         try:
             if session is not None and link_codex(folder, session):
@@ -603,7 +688,6 @@ def run_codex(folder, command, extra, claimed):
             pass
         status = run(argv, watch)
         try:
-            note(unseen_codex(folder, looked[0]))
             session = read_session(folder, "codex")
             if session in held:  # the one resumed, or opened since
                 link_codex(folder, session)
@@ -611,19 +695,18 @@ def run_codex(folder, command, extra, claimed):
             pass  # stays in Codex's home, taken over at the next start
         return status
     finally:
-        for guard in held.values():
-            os.close(guard)
+        held.close()
 
 
 RUNNERS = {"claude": run_claude, "codex": run_codex}
 
 
 def hook_main(argv=None):
-    """book-session FOLDER: Claude Code's hook, its report on stdin. Says
-    nothing: what a SessionStart hook prints, the agent reads."""
+    """book-session REPORT: Claude Code's hook, what it opened on stdin.
+    Says nothing: what a SessionStart hook prints, the agent reads."""
     arguments = sys.argv[1:] if argv is None else argv
     if len(arguments) == 1:
-        note_claude(arguments[0], sys.stdin)
+        report_claude(arguments[0], sys.stdin)
     return 0
 
 
