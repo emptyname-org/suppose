@@ -50,6 +50,7 @@ Commands:
 
     make build    # dist/book-editor
     make deb      # dist/book-editor_VERSION_amd64.deb
+    make install  # make deb, then installs the package with sudo
     make test     # unit tests, then the built editor on a hidden display, with
                   # and without folder watching; statements and branches of
                   # src/book_panes are covered to at least 85 %
@@ -62,11 +63,12 @@ lives below it during the tests, and a socket path is short.
 
 ## Install
 
-    sudo apt install ./dist/book-editor_VERSION_amd64.deb
+    make install
 
-puts the application into `/opt/book-editor`, with the command `book-editor`,
-a menu entry and "Open with" for folders. `sudo apt remove book-editor`
-removes it.
+builds the package and installs it with `sudo apt-get install`, which asks for
+the password: the application in `/opt/book-editor`, the command
+`book-editor`, a menu entry and "Open with" for folders. Run again, it
+installs the new build. `sudo apt remove book-editor` removes it.
 
 ## Run
 

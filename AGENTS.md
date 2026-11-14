@@ -4,7 +4,8 @@
   the unit tests and the built editor on a hidden display, with and without
   folder watching; statements and branches of `src/book_panes` are covered to
   at least 85 %. `make lint` runs ruff, mypy, shellcheck and the advisory check
-  of the pinned packages (needs the network). `make deb` packages the build. `make clean` removes the build.
+  of the pinned packages (needs the network). `make deb` packages the build. `make install` installs the package with
+  sudo; agents and tests never run it. `make clean` removes the build.
 - `src/book_panes/`: panes, folders, channel (editor side), client (agent
   side), agents (ending the agent process), engines (Claude Code and Codex,
   the folder's conversations), mcp (the channel as Codex's tools), choose
