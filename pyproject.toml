@@ -16,11 +16,11 @@ ignore_missing_imports = true
 [tool.coverage.run]
 branch = true
 parallel = true
-source = ["src/book_panes", "dist/book-editor/book_panes"]
+source = ["src/book_panes", "dist/suppose/book_panes"]
 data_file = "tmp/coverage/.coverage"
 
 [tool.coverage.paths]
-book_panes = ["src/book_panes", "*/dist/book-editor/book_panes"]
+book_panes = ["src/book_panes", "*/dist/suppose/book_panes"]
 
 [tool.coverage.report]
 fail_under = 85

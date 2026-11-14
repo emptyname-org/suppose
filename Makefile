@@ -14,7 +14,7 @@ deb: build
 	/usr/bin/python3 tools/deb.py
 
 install: deb
-	sudo apt-get install --reinstall ./dist/book-editor_$(VERSION)_amd64.deb
+	sudo apt-get install --reinstall ./dist/suppose_$(VERSION)_amd64.deb
 
 dev: .venv/.tools_ready
 
@@ -33,7 +33,7 @@ lint: dev
 	.venv/bin/ruff check src tests tools
 	.venv/bin/ruff format --check src tests tools
 	.venv/bin/mypy src/book_panes src/bin/book-agent src/bin/book-view src/bin/book-edit src/bin/book-mcp src/bin/book-session tools
-	.venv/bin/shellcheck src/bin/book-editor tests/smoke/run.sh tools/test.sh
+	.venv/bin/shellcheck src/bin/suppose tests/smoke/run.sh tools/test.sh
 	$(MAKE) audit
 
 audit:

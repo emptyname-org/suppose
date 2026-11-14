@@ -7,7 +7,7 @@ cd "$root"
 import os
 import sys
 # Linux sun_path, allowing the largest PID and tempfile's eight-character suffix.
-size = len(os.fsencode(sys.argv[1] + "/book-editor-2147483647-xxxxxxxx/socket"))
+size = len(os.fsencode(sys.argv[1] + "/suppose-2147483647-xxxxxxxx/socket"))
 if size > 107:
     sys.exit(
         f"test: checkout path is too long for the editor socket ({size} bytes; "
@@ -29,7 +29,7 @@ export XDG_RUNTIME_DIR="$root/tmp/test_runtime"
 export PYTHONUSERBASE="$root/tmp/coverage_user"
 export COVERAGE_PROCESS_START="$root/pyproject.toml"
 export COVERAGE_FILE="$root/tmp/coverage/.coverage"
-export BOOK_EDITOR_DIST="$root/dist/book-editor"
+export SUPPOSE_DIST="$root/dist/suppose"
 .venv/bin/python -m coverage erase
 /usr/bin/python3 - <<'PY'
 import pathlib

@@ -13,7 +13,7 @@ from pathlib import Path
 import build
 
 ROOT = build.ROOT
-APP_ID = "io.github.emptyname_org.BookEditor"
+APP_ID = "io.github.emptyname_org.Suppose"
 
 
 def read_version() -> str:
@@ -53,9 +53,9 @@ def normalize(tree: Path) -> None:
 
 def copyright_text() -> str:
     return (
-        "book-editor: original files CC0-1.0; Apostrophe and its patch GPL-3.\n"
+        "suppose: original files CC0-1.0; Apostrophe and its patch GPL-3.\n"
         "Bundled packages retain their copyright and licence notices under\n"
-        "/opt/book-editor/usr/share/doc/.\n\n"
+        "/opt/suppose/usr/share/doc/.\n\n"
         + (ROOT / "LICENSE").read_text()
         + "\nApostrophe and its patch: GNU General Public License version 3\n\n"
         + (ROOT / "patches/COPYING").read_text()
@@ -70,17 +70,17 @@ def package(app: Path, depends: str, version: str, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="deb-", dir=ROOT / "tmp") as scratch:
         tree = Path(scratch) / "root"
-        shutil.copytree(app, tree / "opt/book-editor", symlinks=True)
-        command = tree / "usr/bin/book-editor"
+        shutil.copytree(app, tree / "opt/suppose", symlinks=True)
+        command = tree / "usr/bin/suppose"
         command.parent.mkdir(parents=True)
-        command.symlink_to("/opt/book-editor/bin/book-editor")
+        command.symlink_to("/opt/suppose/bin/suppose")
         desktop = tree / "usr/share/applications"
         desktop.mkdir(parents=True)
         shutil.copyfile(
             ROOT / "assets" / f"{APP_ID}.desktop", desktop / f"{APP_ID}.desktop"
         )
         shutil.copytree(ROOT / "assets/icons/hicolor", tree / "usr/share/icons/hicolor")
-        doc = tree / "usr/share/doc/book-editor"
+        doc = tree / "usr/share/doc/suppose"
         doc.mkdir(parents=True)
         (doc / "copyright").write_text(copyright_text())
         size = sum(
@@ -91,7 +91,7 @@ def package(app: Path, depends: str, version: str, output: Path) -> None:
         control = tree / "DEBIAN"
         control.mkdir()
         (control / "control").write_text(
-            f"Package: book-editor\nVersion: {version}\nArchitecture: amd64\n"
+            f"Package: suppose\nVersion: {version}\nArchitecture: amd64\n"
             "Section: editors\nPriority: optional\n"
             "Maintainer: emptyname <noreply@emptyname.org>\n"
             f"Depends: {depends}\nInstalled-Size: {(size + 1023) // 1024}\n"
@@ -99,7 +99,7 @@ def package(app: Path, depends: str, version: str, output: Path) -> None:
             " Apostrophe with a folder pane and Claude Code or Codex conversations.\n"
         )
         normalize(tree)
-        archive = Path(scratch) / "book-editor.deb"
+        archive = Path(scratch) / "suppose.deb"
         build.run("dpkg-deb", "--root-owner-group", "--build", str(tree), str(archive))
         os.replace(archive, output)
 
@@ -117,7 +117,7 @@ def main() -> int:
                     raise ValueError(
                         f"unverified archive: {archive.name}; run make build"
                     )
-            output = build.DIST / f"book-editor_{version}_amd64.deb"
+            output = build.DIST / f"suppose_{version}_amd64.deb"
             package(
                 build.APP, dependencies(lock["packages"], archives), version, output
             )

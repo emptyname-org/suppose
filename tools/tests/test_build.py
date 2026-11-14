@@ -68,7 +68,7 @@ class BuildTest(unittest.TestCase):
 
     def test_failed_patch_preserves_previous_build_and_removes_staging(self):
         dist = self.root / "dist"
-        app = dist / "book-editor"
+        app = dist / "suppose"
         app.mkdir(parents=True)
         (app / ".complete").write_text("previous")
         (self.root / "patches").mkdir()

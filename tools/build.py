@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "tmp" / "debs"
 DIST = ROOT / "dist"
-APP = DIST / "book-editor"
+APP = DIST / "suppose"
 HOST_PACKAGES = (
     "python3-gi",
     "python3-cairo",
@@ -211,11 +211,11 @@ def build(compare: Path | None = None) -> None:
     archives = [fetch(item, lock["snapshot"]) for item in lock["packages"]]
     check_dependencies(lock["packages"], archives)
     DIST.mkdir(exist_ok=True)
-    backup = DIST / ".book-editor-previous"
+    backup = DIST / ".suppose-previous"
     # Recover a promotion interrupted between the two renames.
     if backup.exists() and not APP.exists():
         backup.rename(APP)
-    stage = Path(tempfile.mkdtemp(prefix=".book-editor-", dir=DIST))
+    stage = Path(tempfile.mkdtemp(prefix=".suppose-", dir=DIST))
     try:
         for archive in archives:
             run("dpkg-deb", "-x", str(archive), str(stage))
@@ -267,7 +267,7 @@ def build(compare: Path | None = None) -> None:
     finally:
         if stage.exists():
             shutil.rmtree(stage)
-    print("Built dist/book-editor")
+    print("Built dist/suppose")
 
 
 def main() -> int:
@@ -278,7 +278,7 @@ def main() -> int:
     try:
         with build_lock():
             if args.clean:
-                for path in (APP, *DIST.glob(".book-editor-*")):
+                for path in (APP, *DIST.glob(".suppose-*")):
                     if path.exists():
                         shutil.rmtree(path)
             else:

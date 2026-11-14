@@ -24,13 +24,13 @@ class PackageTest(unittest.TestCase):
         self.app.mkdir()
         (self.app / ".complete").write_text("built\n")
         (self.app / "bin").mkdir()
-        executable = self.app / "bin/book-editor"
+        executable = self.app / "bin/suppose"
         executable.write_text("#!/bin/sh\nexit 0\n")
         executable.chmod(0o700)
         (self.app / "module.py").write_text("value = 1\n")
         (self.app / "module.py").chmod(0o600)
         (self.app / "linked").symlink_to("module.py")
-        self.output = self.root / "book-editor.deb"
+        self.output = self.root / "suppose.deb"
 
     def archive(self, kind):
         data = subprocess.check_output(["dpkg-deb", f"--{kind}-tarfile", self.output])
@@ -45,13 +45,13 @@ class PackageTest(unittest.TestCase):
         with self.archive("fsys") as archive:
             members = {entry.name: entry for entry in archive}
             self.assertEqual(
-                members["./usr/bin/book-editor"].linkname,
-                "/opt/book-editor/bin/book-editor",
+                members["./usr/bin/suppose"].linkname,
+                "/opt/suppose/bin/suppose",
             )
-            self.assertEqual(members["./opt/book-editor/linked"].linkname, "module.py")
+            self.assertEqual(members["./opt/suppose/linked"].linkname, "module.py")
             for entry in members.values():
                 self.assertEqual((entry.uid, entry.gid), (0, 0), entry.name)
-                if entry.isdir() or entry.name == "./opt/book-editor/bin/book-editor":
+                if entry.isdir() or entry.name == "./opt/suppose/bin/suppose":
                     self.assertEqual(entry.mode, 0o755, entry.name)
                 elif entry.isfile():
                     self.assertEqual(entry.mode, 0o644, entry.name)
@@ -63,16 +63,14 @@ class PackageTest(unittest.TestCase):
                 )
                 self.assertIn(name, members)
             self.assertIn(f"./usr/share/applications/{deb.APP_ID}.desktop", members)
-            copyright = archive.extractfile(
-                "./usr/share/doc/book-editor/copyright"
-            ).read()
+            copyright = archive.extractfile("./usr/share/doc/suppose/copyright").read()
             self.assertIn(b"CC0-1.0", copyright)
             self.assertIn(b"GPL-3", copyright)
         with self.archive("ctrl") as archive:
             self.assertEqual({item.name for item in archive}, {".", "./control"})
             control = archive.extractfile("./control").read().decode()
             for field in (
-                "Package: book-editor",
+                "Package: suppose",
                 "Version: 0.1.0",
                 "Architecture: amd64",
                 "Maintainer: emptyname <noreply@emptyname.org>",
