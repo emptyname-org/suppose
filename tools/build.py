@@ -236,6 +236,11 @@ def build(compare: Path | None = None) -> None:
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
+        shutil.copytree(
+            ROOT / "assets/icons/hicolor",
+            stage / "usr/share/icons/hicolor",
+            dirs_exist_ok=True,
+        )
         check_imports(stage)
         if compare is not None:
             run(

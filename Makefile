@@ -4,10 +4,13 @@ export TMPDIR := $(ROOT)/tmp
 export PIP_CACHE_DIR := $(ROOT)/tmp/pip
 export PYTHONDONTWRITEBYTECODE := 1
 .NOTPARALLEL:
-.PHONY: build test lint audit dev clean
+.PHONY: build deb test lint audit dev clean
 
 build:
 	/usr/bin/python3 tools/build.py
+
+deb: build
+	/usr/bin/python3 tools/deb.py
 
 dev: .venv/.tools_ready
 
@@ -25,7 +28,7 @@ test: dev build
 lint: dev
 	.venv/bin/ruff check src tests tools
 	.venv/bin/ruff format --check src tests tools
-	.venv/bin/mypy src/book_panes src/bin/book-agent src/bin/book-view src/bin/book-edit tools
+	.venv/bin/mypy src/book_panes src/bin/book-agent src/bin/book-view src/bin/book-edit src/bin/book-mcp src/bin/book-session tools
 	.venv/bin/shellcheck src/bin/book-editor tests/smoke/run.sh tools/test.sh
 	$(MAKE) audit
 
