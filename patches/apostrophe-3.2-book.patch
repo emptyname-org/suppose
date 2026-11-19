@@ -67,7 +67,19 @@
          # Setup text editor
          self.textview = self.editor.textview
          self.textview.get_buffer().connect('changed', self.on_text_changed)
-@@ -291,6 +304,10 @@
+@@ -143,9 +156,8 @@
+         #self.settings.bind("spellcheck", self.textview,
+         #                   "spellcheck", Gio.SettingsBindFlags.GET)
+ 
+-        # Setting up text size
+-        self.settings.bind("bigger-text", self.textview,
+-                           "bigger_text", Gio.SettingsBindFlags.GET)
++        # book panes: the text's font is chosen in Preferences
++        # (book_panes/fonts.py), Large Text is gone
+ 
+         self.settings.bind("characters-per-line", self.textview,
+                            "line_chars", Gio.SettingsBindFlags.GET)
+@@ -291,6 +303,10 @@
          if self.get_application()._application_id == 'org.gnome.gitlab.somas.Apostrophe.Devel':
              self.add_css_class('devel')
  
@@ -78,7 +90,7 @@
  
      def on_text_changed(self, *_args):
          """called when the text changes, sets the self.did_change to true and
-@@ -338,12 +355,24 @@
+@@ -338,12 +354,24 @@
      def load_preview(self, *args):
          self.current.security_level = PreviewSecurity.UNRESTRICTED
  
@@ -105,7 +117,7 @@
          if self.current.gfile:
              LOGGER.info("saving")
  
-@@ -368,18 +397,21 @@
+@@ -368,18 +396,21 @@
                  LOGGER.warning(str(error.reason))
                  return
              else:
@@ -132,7 +144,7 @@
          # if there's no GFile we ask for one:
          else:
              self.save_document_as(callback=callback)
-@@ -391,6 +423,8 @@
+@@ -391,6 +422,8 @@
  
          def on_response(dialog, response):
              if response == Gtk.ResponseType.ACCEPT:
@@ -141,7 +153,7 @@
  
                  file = dialog.get_file()
  
-@@ -432,7 +466,26 @@
+@@ -432,7 +465,26 @@
  
          self.filechooser.show()
  
@@ -169,7 +181,7 @@
          try:
              success, _etag = gfile.replace_contents_finish(result)
          except GLib.GError as error:
-@@ -440,26 +493,45 @@
+@@ -440,26 +492,45 @@
              self.did_change = True
              self.progressbar_fade_out.play()
              self._set_file_monitor()
@@ -220,7 +232,7 @@
  
          return success
  
-@@ -515,11 +587,30 @@
+@@ -515,51 +586,123 @@
          """Open File from command line or open / open recent etc."""
          LOGGER.info("trying to open %s", file.get_uri())
  
@@ -237,6 +249,7 @@
 +        if self._before_load is None:
 +            self._before_load = (self.current.gfile, self.loaded_uri,
 +                                 self.disk_etag, self.base_bytes)
++        self._tell_book("leaving")
 +        self.textview.set_editable(False)
 +        self._load_generation += 1
          self.current.gfile = file
@@ -251,8 +264,16 @@
 +                                               self._load_generation)
          self._set_file_monitor()
  
++    def _tell_book(self, event):
++        """book panes: "leaving" before the buffer takes another text,
++        "shown" when it holds a file's."""
++        book = getattr(self, "book", None)
++        if book is not None:
++            book.on_document(event)
++
      @Gtk.Template.Callback()
-@@ -528,38 +619,83 @@
+     def reload_file(self, *args):
+         self.discard_infobar.set_revealed(False)
          self.load_file(self.current.gfile)
  
      def _set_file_monitor(self, *args, **kwargs):
@@ -348,7 +369,7 @@
              self.textview.set_text(decoded)
              self.preview_security_handler.assert_security_risk(decoded)
              start_iter = self.textview.get_buffer().get_start_iter()
-@@ -575,6 +711,11 @@
+@@ -575,6 +718,12 @@
              self.update_headerbar_title()
  
              self.did_change = False
@@ -356,11 +377,35 @@
 +            self.disk_etag = _etag
 +            self.base_bytes = contents
 +            self.disk_conflict = False
++            self._tell_book("shown")
 +            return True
  
      def check_change(self,
                       callback = None):
-@@ -722,6 +863,10 @@
+@@ -617,6 +766,7 @@
+         """create new document in the same window
+         """
+         def callback(self):
++            self._tell_book("leaving")
+             self.textview.clear()
+ 
+             self.did_change = False
+@@ -665,6 +815,14 @@
+ 
+     @Gtk.Template.Callback()
+     def reveal_headerbar_bottombar(self, *args):
++        # book panes: the keyboard leaving the text for the tree or the
++        # agent is no reason to show the bars; the panes decide
++        book = getattr(self, "book", None)
++        if book is not None and args \
++                and isinstance(args[0], Gtk.EventControllerFocus):
++            book.on_editor_left()
++            return
++
+         self.editor.reveal_bottombar()
+ 
+         if not self.toolbar_revealer.get_reveal_child():
+@@ -722,6 +880,10 @@
              self.run_dispose()
              return False
  
@@ -384,6 +429,23 @@
          self.content_container.unparent()
          self.panel_container.unparent()
          self.separator.unparent()
+--- a/lib/python3/dist-packages/apostrophe/preferences_dialog.py
++++ b/lib/python3/dist-packages/apostrophe/preferences_dialog.py
+@@ -153,10 +153,10 @@
+                            "active",
+                            Gio.SettingsBindFlags.DEFAULT)
+ 
+-        self.settings.bind("bigger-text",
+-                           self.bigger_text_row,
+-                           "active",
+-                           Gio.SettingsBindFlags.DEFAULT)
++        # book panes: a font for the text and one for the agent in place
++        # of Large Text
++        from book_panes import fonts
++        fonts.add_rows(self, self.settings, self.bigger_text_row)
+ 
+     @Gtk.Template.Callback()
+     def on_input_format(self, _widget, _index):
 --- a/lib/python3/dist-packages/apostrophe/preview_converter.py
 +++ b/lib/python3/dist-packages/apostrophe/preview_converter.py
 @@ -51,6 +51,9 @@
@@ -422,6 +484,84 @@
          if not self.counting:
              self.counting = True
              self.count_pending_text = None
+--- a/lib/python3/dist-packages/apostrophe/text_buffer.py
++++ b/lib/python3/dist-packages/apostrophe/text_buffer.py
+@@ -27,6 +27,24 @@
+         super().__init__()
+         self.connect("paste-done", self._on_clipboard_paste_finished)
+ 
++    # book panes hides the tags of marks (book_panes/marks.py): they are
++    # text of the file all the same, to save, to preview, to count
++    def get_text(self, start, end, include_hidden_chars=True):
++        return GtkSource.Buffer.get_text(self, start, end, True)
++
++    def get_slice(self, start, end, include_hidden_chars=True):
++        return GtkSource.Buffer.get_slice(self, start, end, True)
++
++    # book panes: a text set as a whole, a file loaded, is not written by hand
++    setting_text = False
++
++    def set_text(self, text, length=-1):
++        self.setting_text = True
++        try:
++            GtkSource.Buffer.set_text(self, text, length)
++        finally:
++            self.setting_text = False
++
+     @contextmanager
+     def _temp_disable_hemingway(self):
+         ''' Disables hemingway mode before an action and enables it right away
+--- a/lib/python3/dist-packages/apostrophe/text_view.py
++++ b/lib/python3/dist-packages/apostrophe/text_view.py
+@@ -35,7 +35,7 @@
+ 
+ import logging
+ 
+-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, GtkSource, Spelling
++from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, GtkSource, Pango, Spelling
+ 
+ LOGGER = logging.getLogger('apostrophe')
+ 
+@@ -60,6 +60,19 @@
+     focus_mode = GObject.Property(type=bool, default=False)
+     font_size = GObject.Property(type=int, default=16)
+     line_chars = GObject.Property(type=int, default=66)
++
++    # book panes: a font chosen in Preferences (a Pango.FontDescription,
++    # set by the style sheet of book_panes/fonts.py) in place of Fira Mono
++    # in a size fitted to the width
++    chosen_font = None
++
++    def choose_font(self, description):
++        self.chosen_font = description
++        self.font_size = 0  # the default finds its size class anew
++        for size_class in self.get_css_classes():
++            if size_class.startswith("size"):
++                self.remove_css_class(size_class)
++        self.queue_resize()
+     spellcheck = GObject.Property(type=bool, default=True)
+ 
+     scroller = None
+@@ -326,6 +339,19 @@
+     @Gtk.Template.Callback()
+     def _update_horizontal_margin(self, *args, **kwargs):
+         width = self.get_allocation().width
++        if self.chosen_font is not None:
++            # book panes: the size stays as chosen; the line is as long as
++            # Apostrophe's where the width allows, with room for the markup
++            char_width = Pango.units_to_double(
++                self.get_pango_context().get_metrics(self.chosen_font, None)
++                .get_approximate_char_width())
++            line_width = (self.line_chars + 1) * int(char_width) - 1
++            horizontal_margin = int(max((width - line_width) / 2,
++                                        4 * char_width))
++            self.set_left_margin(horizontal_margin)
++            self.set_right_margin(horizontal_margin)
++            return
++
+         # Ensure the appropriate font size is being used
+         for font_size in self._get_font_sizes():
+             if width >= self.get_min_width(font_size):
 --- a/share/apostrophe/media/css/web/base.css
 +++ b/share/apostrophe/media/css/web/base.css
 @@ -505,3 +505,10 @@
@@ -435,3 +575,28 @@
 +mark.blue, .mark-blue { background-color: #c7e2ff; color: #1e1e1e; }
 +mark.pink, .mark-pink { background-color: #ffd0e6; color: #1e1e1e; }
 +mark.orange, .mark-orange { background-color: #ffd8ae; color: #1e1e1e; }
+--- a/share/glib-2.0/schemas/org.gnome.gitlab.somas.Apostrophe.gschema.xml
++++ b/share/glib-2.0/schemas/org.gnome.gitlab.somas.Apostrophe.gschema.xml
+@@ -128,6 +128,22 @@
+         Preferred relative size for the text.
+       </description>
+     </key>
++    <key name='editor-font' type='s'>
++      <default>''</default>
++      <summary>Font of the text</summary>
++      <description>
++        book panes: a font as Pango describes one, with its size. Empty for
++        Fira Mono in a size fitted to the width.
++      </description>
++    </key>
++    <key name='terminal-font' type='s'>
++      <default>''</default>
++      <summary>Font of the agent's terminal</summary>
++      <description>
++        book panes: a font as Pango describes one, with its size. Empty for
++        the system's monospace font.
++      </description>
++    </key>
+     <key name='toolbar-active' type='b'>
+       <default>false</default>
+       <summary>Toolbar</summary>

@@ -20,7 +20,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Vte", "3.91")
 from apostrophe import config
-from gi.repository import Adw, Gio, GLib, Gtk, Vte
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango, Vte
 
 Gio.Resource._register(
     Gio.resource_load(os.path.join(config.PKGDATA_DIR, "apostrophe.gresource"))
@@ -30,7 +30,16 @@ from apostrophe import helpers  # after the resources: it loads widgets
 from apostrophe.application import Application
 from apostrophe.preview_security import PreviewSecurity, PreviewSecurityHandler
 
-from book_panes import agents, channel, engines, folders, marks, panes, paste
+from book_panes import (
+    agents,
+    channel,
+    engines,
+    folders,
+    fonts,
+    marks,
+    panes,
+    paste,
+)
 
 WATCHING = os.environ.get("SMOKE_WATCH") != "0"
 if not WATCHING:  # as with the inotify limit reached
@@ -444,7 +453,7 @@ def scenario(app):
         and buffer.get_text(*bounds, True) == "First chapter.",
     )
     check(
-        "mark: painted, its tags dimmed",
+        "mark: painted, its tags hidden",
         painted("First") == ["book-mark-yellow"]
         and "book-mark-tag" in painted("<mark")
         and "book-mark-tag" in painted("</mark>"),
@@ -486,6 +495,249 @@ def scenario(app):
         "mark: removed, the file is as before",
         read(CH1) == typed and not window.did_change,
     )
+
+    # the tags of a mark are hidden in the editor, and stay whole
+    def shown():
+        return Gtk.TextBuffer.get_text(buffer, *buffer.get_bounds(), False)
+
+    def put(part):
+        buffer.place_cursor(buffer.get_iter_at_offset(view.get_text().index(part)))
+
+    def typing(text):
+        """As GTK commits what is typed."""
+        buffer.begin_user_action()
+        buffer.delete_selection(True, True)
+        taken = buffer.insert_interactive_at_cursor(text, -1, True)
+        buffer.end_user_action()
+        return taken
+
+    opened, closed = marks.opening("yellow"), marks.CLOSING
+    select("First chapter.")
+    window.activate_action("book." + marks.ACTION, GLib.Variant("s", "yellow"))
+    check(
+        "hidden: the editor shows a mark without its tags, the text keeps them",
+        shown() == typed and view.get_text() == yellow,
+    )
+    put(closed)
+    view.emit("backspace")
+    taken = typing("!")
+    edited = yellow.replace("chapter.", "chapter!")
+    check(
+        "hidden: keys reach the text beside a tag",
+        taken and view.get_text() == edited and shown() == typed.replace(".", "!"),
+    )
+    put("chapter!")
+    typing("\n")  # Apostrophe inserts it, in its own time
+    yield 400
+    check(
+        "hidden: a new line in a mark breaks the mark",
+        view.get_text()
+        == edited.replace("First chapter!", f"First{closed} \n{opened}chapter!")
+        and shown() == typed.replace("First chapter.", "First \nchapter!"),
+    )
+    buffer.undo()
+    check("hidden: ... in one undo step", view.get_text() == edited)
+    yield 1900
+    check("hidden: saved with its tags", read(CH1) == edited and not window.did_change)
+    select("First chapter!")
+    view.emit("copy-clipboard")
+    buffer.place_cursor(buffer.get_end_iter())
+    view.emit("paste-clipboard")
+    yield 600
+    check(
+        "hidden: a mark copied in the editor is pasted whole",
+        view.get_text() == edited + opened + "First chapter!" + closed
+        and shown() == typed.replace(".", "!") + "First chapter!",
+    )
+    buffer.undo()
+    buffer.place_cursor(buffer.get_end_iter())
+    view.activate_action("book." + paste.ACTION, None)
+    yield 600
+    check(
+        "paste: what was copied in the editor arrives as it shows",
+        view.get_text() == edited + "First chapter!",
+    )
+    buffer.undo()
+    select("First chapter!")
+    view.emit("backspace")
+    check(
+        "hidden: a mark goes with the last of its text",
+        view.get_text() == typed.replace("First chapter.", ""),
+    )
+    buffer.undo()
+    put("chapter!")
+    window.activate_action("book." + marks.CLEAR, None)
+    select("!")
+    typing(".")
+    yield 1900
+    check(
+        "hidden: unmarked, the file is as before",
+        view.get_text() == typed and read(CH1) == typed and not window.did_change,
+    )
+
+    # a file is shown again where it was left: cursor and scrolling
+    long_path = os.path.join(BOOK, "long.md")
+    long_text = "".join(
+        f"Paragraph {number} of a long chapter, with words enough for a line.\n\n"
+        for number in range(1, 401)
+    )
+    write(long_path, long_text)
+    long_file = Gio.File.new_for_path(long_path)
+    adjustment = window.editor.scrolledwindow.get_vadjustment()
+
+    def stands(place, scroll):
+        return (
+            buffer.get_property("cursor-position") == place
+            and abs(adjustment.get_value() - scroll) < 2
+        )
+
+    buffer.place_cursor(buffer.get_iter_at_offset(3))
+    book.open_file(long_file)
+    yield 1500
+    check(
+        "place: a file not seen before begins at its beginning",
+        view.get_text() == long_text and stands(0, 0),
+    )
+    place = long_text.index("Paragraph 30 ")
+    buffer.place_cursor(buffer.get_iter_at_offset(place))
+    yield 1200  # Apostrophe scrolls to the cursor
+    adjustment.set_value(4000)  # and the writer reads on, far from it
+    yield 300
+    check("place: the long file is scrolled", stands(place, 4000))
+    book.open_file(ch1)
+    yield 1200
+    check(
+        "place: the file before is shown where it was left",
+        view.get_text() == typed and buffer.get_property("cursor-position") == 3,
+    )
+    book.open_file(long_file)
+    yield 1500
+    check(
+        "place: the long file is shown where it was left",
+        view.get_text() == long_text and stands(place, 4000),
+    )
+    yield 800  # the file monitor is back
+    write(long_path, long_text + "more\n")
+    yield 2600
+    check(
+        "place: changed on disk, it stays where it stands",
+        view.get_text() == long_text + "more\n" and stands(place, 4000),
+    )
+    documents = [book._document()]
+    window.new_document()
+    documents.append(book._document())
+    window.new_document()
+    documents.append(book._document())
+    check(
+        "document: a new text is another one than the new text before",
+        len(set(documents)) == 3 and window.current.gfile is None,
+    )
+    book.open_file(long_file)
+    yield 1500
+    check(
+        "place: kept while a new text was open",
+        view.get_text() == long_text + "more\n" and stands(place, 4000),
+    )
+    book.open_file(ch1)
+    yield 1200
+    os.remove(long_path)
+    yield 2600
+    check(
+        "place: back in the first file",
+        view.get_text() == typed
+        and buffer.get_property("cursor-position") == 3
+        and not window.did_change,
+    )
+
+    # the bars hide while typing, to the agent too, and the keyboard going
+    # to another pane does not bring them back
+    bar = window.toolbar_revealer
+    window.reveal_headerbar_bottombar()
+    view.grab_focus()
+    yield 200
+    shown = bar.get_reveal_child()
+    book._on_terminal_key(None, Gdk.KEY_x, 0, Gdk.ModifierType(0))
+    check("bars: typing to the agent hides them", shown and not bar.get_reveal_child())
+    book.terminal.grab_focus()
+    yield 300
+    check(
+        "bars: stay hidden when the keyboard goes to the agent",
+        window.get_focus() is book.terminal and not bar.get_reveal_child(),
+    )
+    view.grab_focus()
+    window.lookup_action("find").activate(None)
+    yield 300
+    check(
+        "bars: shown for the search",
+        window.searchbar.search_mode_enabled and bar.get_reveal_child(),
+    )
+    window.searchbar.search_mode_enabled = False
+    yield 300
+
+    # Preferences: a font for the editor, one for the agent
+    def editor_font():
+        described = view.get_pango_context().get_font_description()
+        sizes = [name for name in view.get_css_classes() if name.startswith("size")]
+        return described.get_family(), described.get_size(), sizes
+
+    def agent_font():
+        return book.terminal.get_font().to_string(), book.terminal.get_char_width()
+
+    own = editor_font(), view.get_left_margin(), agent_font()
+    app.activate_action("preferences", None)
+    yield 800
+    dialog = window.get_visible_dialog()
+    rows = getattr(dialog, "font_rows", {})
+    check(
+        "fonts: Preferences offer one for the editor, one for the agent, no Large Text",
+        sorted(rows) == [fonts.EDITOR_KEY, fonts.TERMINAL_KEY]
+        and not dialog.bigger_text_row.get_visible()
+        and not any(row.reset.get_sensitive() for row in rows.values())
+        and own[0][2] != [],
+    )
+    rows[fonts.EDITOR_KEY].button.set_font_desc(
+        Pango.FontDescription.from_string("Serif 20")
+    )
+    yield 600
+    family, size, sizes = editor_font()
+    check(
+        "fonts: the editor takes the chosen one, the agent keeps its own",
+        window.settings.get_string(fonts.EDITOR_KEY) == "Serif 20"
+        and family == "Serif"
+        and size > 1.5 * own[0][1]
+        and sizes == []
+        and view.get_left_margin() != own[1]
+        and agent_font() == own[2],
+    )
+    rows[fonts.TERMINAL_KEY].button.set_font_desc(
+        Pango.FontDescription.from_string("Monospace 16")
+    )
+    yield 600
+    check(
+        "fonts: the agent takes its own",
+        agent_font()[0] == "Monospace 16"
+        and agent_font()[1] > own[2][1]
+        and editor_font()[0] == "Serif",
+    )
+    for row in rows.values():
+        row.reset.emit("clicked")
+    yield 600
+    check(
+        "fonts: the defaults come back",
+        (editor_font(), view.get_left_margin(), agent_font()) == own
+        and window.settings.get_string(fonts.EDITOR_KEY) == ""
+        and window.settings.get_string(fonts.TERMINAL_KEY) == "",
+    )
+    dialog.close()
+    yield 300
+    check(
+        "fonts: closed Preferences listen no more",
+        not any(
+            GObject.signal_handler_is_connected(row.settings, row.handler)
+            for row in rows.values()
+        ),
+    )
+    view.grab_focus()
 
     yield 800  # the file monitor comes back 500 ms after a save
     write(CH1, "from agent\n")

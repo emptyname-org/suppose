@@ -15,6 +15,7 @@ Environment:
 
 import os
 import time
+from typing import NamedTuple
 
 import gi
 
@@ -24,7 +25,7 @@ gi.require_version("Vte", "3.91")
 from apostrophe import config
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango, Vte
 
-from . import APP_ID, agents, channel, engines, marks, paste
+from . import APP_ID, agents, channel, engines, fonts, marks, paste
 from .folders import (
     ATTRIBUTES,
     FolderListing,
@@ -40,6 +41,7 @@ SYNC_DEBOUNCE_MS = 150
 DISK_POLL_SECONDS = 1
 TREE_POLL_SECONDS = 2
 BUSY_RETRY_MS = 100
+MAX_PLACES = 500  # files whose place in the editor is remembered
 BUSY_RETRIES = 50
 START_WAIT_SECONDS = 2.0  # shutdown: for agent starts under way to report
 TREE_WIDTH = 240
@@ -219,6 +221,15 @@ def context_text(root, gfile, selection):
     return " ".join(parts) + " " if parts else ""
 
 
+class Place(NamedTuple):
+    """Where a file stood in the editor: its cursor, the character at the
+    top of what was shown, and how far above the top that one's line began."""
+
+    cursor: int
+    top: int
+    shift: float
+
+
 class BookPanes:
     def __init__(self, window):
         self.window = window
@@ -234,7 +245,10 @@ class BookPanes:
         self.restart_pending = False  # the agent was told to go, start anew
         self.closed = False
         self.current_handler = 0
+        self.font_handlers = []
         self.wanted = None  # file asked for, shown once edits are saved
+        self.serial = 0  # of the text in the editor: grows when another comes
+        self.places = {}  # file uri -> Place, for when it is shown again
         self.autosave_timer = 0
         self.sync_timer = 0
         self.disk_poll_timer = 0
@@ -558,6 +572,15 @@ class BookPanes:
         marks.install(actions, self.marker)
         self.mark_button = marks.menu_button("book")
         window.headerbar.headerbar.pack_start(self.mark_button)  # beside Save
+        self.font_handlers = [
+            window.settings.connect("changed::" + key, show)
+            for key, show in (
+                (fonts.EDITOR_KEY, self._show_editor_font),
+                (fonts.TERMINAL_KEY, self._show_terminal_font),
+            )
+        ]
+        self._show_editor_font()
+        self._show_terminal_font()
         window.connect("destroy", self.close)
         # the file monitor can be late or unavailable; a stat a second is cheap
         self.disk_poll_timer = GLib.timeout_add_seconds(
@@ -566,6 +589,41 @@ class BookPanes:
         self.tree_poll_timer = GLib.timeout_add_seconds(
             TREE_POLL_SECONDS, self._poll_tree
         )
+
+    def _show_editor_font(self, *_args):
+        window = self.window
+        fonts.use_in_editor(
+            window.textview, window.settings.get_string(fonts.EDITOR_KEY)
+        )
+
+    def _show_terminal_font(self, *_args):
+        fonts.use_in_terminal(
+            self.terminal, self.window.settings.get_string(fonts.TERMINAL_KEY)
+        )
+
+    def on_editor_left(self):
+        """The keyboard left the text; the patched window tells. Apostrophe
+        shows its bars then. Here the tree and the agent are part of the
+        work: the bars come back only for a menu, the search, another
+        place of the window. Where the keyboard went is known afterwards."""
+        GLib.idle_add(self._show_bars_for_focus)
+
+    def _show_bars_for_focus(self):
+        if self.closed:
+            return GLib.SOURCE_REMOVE
+        window = self.window
+        focus = window.get_focus()
+        panes = (window.editor, self.tree_pane, self.agent_pane)
+        if focus is None or not any(
+            focus is pane or focus.is_ancestor(pane) for pane in panes
+        ):
+            window.reveal_headerbar_bottombar()
+        return GLib.SOURCE_REMOVE
+
+    def _hide_bars_while_typing(self):
+        window = self.window
+        if window.settings.get_boolean("autohide-headerbar"):
+            window.hide_headerbar_bottombar()
 
     def close(self, *_args):
         """The window is gone, or the application quits with it open."""
@@ -579,6 +637,9 @@ class BookPanes:
         if self.current_handler:
             self.window.current.disconnect(self.current_handler)
             self.current_handler = 0
+        for handler in self.font_handlers:
+            self.window.settings.disconnect(handler)
+        self.font_handlers = []
         for name in (
             "autosave_timer",
             "sync_timer",
@@ -608,9 +669,74 @@ class BookPanes:
             self.agent = None
 
     def _document(self):
-        """What tells the document in the editor from another."""
+        """What tells the document in the editor from another: also a new
+        one from the new one before it, and a file from itself loaded
+        again."""
         gfile = self.window.current.gfile
-        return self.window.loaded_uri, gfile.get_uri() if gfile is not None else None
+        uri = gfile.get_uri() if gfile is not None else None
+        return self.serial, self.window.loaded_uri, uri
+
+    def on_document(self, event):
+        """The window tells: "leaving" before its buffer takes another
+        text, "shown" when it holds a file's."""
+        if event == "leaving":
+            self.serial += 1  # what was asked for the text before gives up
+            self._note_place()
+        elif event == "shown":
+            place = self.places.get(self.window.loaded_uri)
+            if place is not None:
+                # after Apostrophe's own idle, which puts the cursor to the
+                # beginning of the text
+                GLib.idle_add(
+                    self._place_cursor, self.window.loaded_uri, place, self.serial
+                )
+
+    def _note_place(self):
+        """Remember where the open file stands, cursor and scrolling, for
+        when it is shown again."""
+        window = self.window
+        if not self._buffer_matches_file():
+            return  # a new text, or the buffer waits for a file's
+        view = window.textview
+        scroll = window.editor.scrolledwindow.get_vadjustment().get_value()
+        # the adjustment counts the margin above the text, the view does not
+        above = scroll - view.get_top_margin()
+        _over_text, top = view.get_iter_at_location(0, int(above))
+        place = Place(
+            view.get_buffer().get_property("cursor-position"),
+            top.get_offset(),
+            above - view.get_iter_location(top).y,
+        )
+        self.places.pop(window.loaded_uri, None)  # the latest last
+        self.places[window.loaded_uri] = place
+        while len(self.places) > MAX_PLACES:
+            del self.places[next(iter(self.places))]
+
+    def _still_shown(self, uri, serial):
+        return (
+            not self.closed and serial == self.serial and self.window.loaded_uri == uri
+        )
+
+    def _place_cursor(self, uri, place, serial):
+        if self._still_shown(uri, serial):
+            buffer = self.window.textview.get_buffer()
+            buffer.place_cursor(buffer.get_iter_at_offset(place.cursor))
+            # after the scrolling to the cursor which Apostrophe begins now
+            GLib.idle_add(self._place_scroll, uri, place, serial)
+        return GLib.SOURCE_REMOVE
+
+    def _place_scroll(self, uri, place, serial):
+        if self._still_shown(uri, serial):
+            view = self.window.textview
+            moving = getattr(view.scroller, "smooth_scroller", None)
+            if moving is not None and moving.is_started:
+                moving.end()
+            top = view.get_buffer().get_iter_at_offset(place.top)
+            adjustment = self.window.editor.scrolledwindow.get_vadjustment()
+            target = view.get_iter_location(top).y + view.get_top_margin() + place.shift
+            limit = adjustment.get_upper() - adjustment.get_page_size()
+            adjustment.set_value(max(0, min(target, limit)))
+        return GLib.SOURCE_REMOVE
 
     def _buffer_matches_file(self):
         window = self.window
@@ -738,23 +864,12 @@ class BookPanes:
             window.discard_infobar.set_revealed(True)
             return GLib.SOURCE_REMOVE
 
-        buffer = window.textview.get_buffer()
-        offset = buffer.get_property("cursor-position")
-        adjustment = window.editor.scrolledwindow.get_vadjustment()
-        scroll = adjustment.get_value()
-
-        def place():
-            end = buffer.get_char_count()
-            buffer.place_cursor(buffer.get_iter_at_offset(min(offset, end)))
-            limit = adjustment.get_upper() - adjustment.get_page_size()
-            adjustment.set_value(max(0, min(scroll, limit)))
-            return GLib.SOURCE_REMOVE
-
         # at once, with the bytes just read: no moment in which typed text
-        # could be lost to a load still under way
+        # could be lost to a load still under way; the text stays where it
+        # stands, cursor and scrolling
+        self.on_document("leaving")
         if window.show_contents(gfile, data, etag):
             window.discard_infobar.set_revealed(False)
-            GLib.idle_add(place)
         else:
             # no longer text: keep the editor's version, the writer decides
             window.disk_conflict = True
@@ -840,16 +955,18 @@ class BookPanes:
             )
         cursor = buffer.get_iter_at_mark(buffer.get_insert()).get_offset()
         start, end, new = channel.plan_edit(text, cursor, selection, request)
-        buffer.begin_user_action()  # one undo step
-        try:
-            if end > start:
-                buffer.delete(
-                    buffer.get_iter_at_offset(start), buffer.get_iter_at_offset(end)
-                )
-            if new:
-                buffer.insert(buffer.get_iter_at_offset(start), new)
-        finally:
-            buffer.end_user_action()
+        with self.marker.exact():  # as the agent made it, marks included
+            buffer.begin_user_action()  # one undo step
+            try:
+                if end > start:
+                    buffer.delete(
+                        buffer.get_iter_at_offset(start),
+                        buffer.get_iter_at_offset(end),
+                    )
+                if new:
+                    buffer.insert(buffer.get_iter_at_offset(start), new)
+            finally:
+                buffer.end_user_action()
         return {
             "line": buffer.get_iter_at_offset(start).get_line() + 1,
             "characters": buffer.get_char_count(),
@@ -961,7 +1078,7 @@ class BookPanes:
         selection = ""
         if buffer.get_has_selection():
             start, end = buffer.get_selection_bounds()
-            selection = buffer.get_text(start, end, False)
+            selection = buffer.get_text(start, end, True)  # as the file has it
         gfile = window.current.gfile if self._buffer_matches_file() else None
         text = context_text(self.root, gfile, selection)
         if text and self.child_pid is not None:
@@ -969,6 +1086,7 @@ class BookPanes:
         self.terminal.grab_focus()
 
     def _on_terminal_key(self, _controller, keyval, _keycode, state):
+        self._hide_bars_while_typing()  # to the agent as into the text
         control = bool(state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         if control and shift and keyval in (Gdk.KEY_C, Gdk.KEY_c):

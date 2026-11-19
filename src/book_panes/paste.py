@@ -4,17 +4,20 @@ Ctrl+Shift+V in the editor, or "Paste HTML as Markdown" in its menu: the
 HTML a browser or a word processor puts on the clipboard beside the plain
 text is converted by pandoc (paste.lua tidies it) and inserted at the
 cursor, as one undo step. Without HTML on the clipboard, or with HTML
-pandoc cannot convert, the plain text is pasted as by Ctrl+V. Images stay
-links; nothing is fetched.
+pandoc cannot convert, the clipboard's plain text is inserted instead.
+Images stay links; nothing is fetched.
 
-A paste ends in one of four ways: Markdown inserted, plain text pasted,
-nothing (the document changed meanwhile, or the clipboard or pandoc took
-too long: a beep), or cancelled with the window.
+A paste ends in one of four ways: Markdown inserted, plain text inserted,
+nothing (the document changed meanwhile, the clipboard or pandoc took too
+long, there is no text, or the place takes none: a beep), or cancelled with
+the window. The plain text is read as part of the same paste: it too
+arrives only in the document it was asked for.
 """
 
 import codecs
 import os
 import re
+from typing import Any
 
 import gi
 
@@ -186,6 +189,7 @@ class MarkdownPaste:
         self.document = document
         self.convert = convert
         self.reading = None  # cancellable of the paste under way
+        self.clipboard: Any = None  # ... and the clipboard it reads
         self.stream = None  # the clipboard's HTML, while it is read
         self.conversion = None
         self.timer = 0
@@ -198,17 +202,17 @@ class MarkdownPaste:
         view = self.view
         if self.reading is not None or not view.get_editable():
             return  # one at a time; the one under way arrives
-        clipboard = view.get_clipboard()
-        if not clipboard.get_formats().contain_mime_type("text/html"):
-            self._paste_plain()
-            return
+        self.clipboard = clipboard = view.get_clipboard()
         self.reading = reading = Gio.Cancellable()
         self.started_in = self.document()
         self.chunks, self.size = [], 0
-        self.timer = GLib.timeout_add(int(READ_SECONDS * 1000), self._on_read_late)
-        clipboard.read_async(
-            ["text/html"], GLib.PRIORITY_DEFAULT, reading, self._on_offer, reading
-        )
+        if clipboard.get_formats().contain_mime_type("text/html"):
+            self._wait_for_clipboard()
+            clipboard.read_async(
+                ["text/html"], GLib.PRIORITY_DEFAULT, reading, self._on_offer, reading
+            )
+        else:
+            self._read_plain()
 
     def close(self):
         """The window goes: nothing is pasted any more."""
@@ -258,11 +262,37 @@ class MarkdownPaste:
             self.chunks = []
             self.conversion = self.convert(html, self._on_converted)
 
+    def _wait_for_clipboard(self):
+        """Give the clipboard's owner its time anew."""
+        self._stop_timer()
+        self.timer = GLib.timeout_add(int(READ_SECONDS * 1000), self._on_read_late)
+
     def _on_read_late(self):
         self.timer = 0
         self._end()
         self._refuse()
         return GLib.SOURCE_REMOVE
+
+    # ---- its plain text -------------------------------------------------------
+
+    def _read_plain(self):
+        """Go on with the paste under way: its plain text instead."""
+        self._wait_for_clipboard()
+        self.clipboard.read_text_async(self.reading, self._on_plain, self.reading)
+
+    def _on_plain(self, clipboard, result, reading):
+        try:
+            text = clipboard.read_text_finish(result)
+        except GLib.GError:
+            text = None
+        if reading is not self.reading:
+            return  # given up meanwhile
+        same = self._same_document()
+        self._end()
+        if text and same:
+            self._insert(text)
+        else:
+            self._refuse()
 
     # ---- its Markdown --------------------------------------------------------
 
@@ -278,17 +308,21 @@ class MarkdownPaste:
         else:
             self._refuse()
 
-    def _insert(self, markdown):
+    def _insert(self, text):
+        """Insert the text as if typed: over the selection, in one undo
+        step, where the editor takes text."""
         view = self.view
         buffer = view.get_buffer()
         buffer.paste_ongoing = True  # Apostrophe: pasted text is not completed
         buffer.begin_user_action()
         try:
-            buffer.delete_selection(False, True)
-            buffer.insert_at_cursor(markdown, -1)
+            buffer.delete_selection(True, True)
+            taken = buffer.insert_interactive_at_cursor(text, -1, True)
         finally:
             buffer.end_user_action()
             buffer.paste_ongoing = False
+        if not taken:
+            self._refuse()
         view.scroll_mark_onscreen(buffer.get_insert())
 
     # ---- the ends ------------------------------------------------------------
@@ -298,15 +332,15 @@ class MarkdownPaste:
 
     def _fall_back(self):
         """No Markdown to be had: the plain text, where it was asked for."""
-        same = self._same_document()
-        self._end()
-        if same:
-            self._paste_plain()
-        else:
+        if not self._same_document():
+            self._end()
             self._refuse()
-
-    def _paste_plain(self):
-        self.view.emit("paste-clipboard")
+            return
+        if self.stream is not None:
+            shut(self.stream)  # what is left of the HTML
+            self.stream = None
+        self.chunks = []
+        self._read_plain()
 
     def _refuse(self):
         self.view.get_display().beep()
@@ -330,6 +364,7 @@ class MarkdownPaste:
             self.conversion = None
         self.chunks = []
         self.started_in = None
+        self.clipboard = None
 
 
 def install(view, group, paste):

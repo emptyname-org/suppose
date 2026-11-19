@@ -8,15 +8,22 @@ agent's terminal on the right.
   opens another folder. The open file is highlighted.
 - **Editor**: Apostrophe. Edits are saved after a second of rest, on switching
   files and on closing. A file the agent changes on disk is reloaded; when both
-  sides changed it, a bar asks which version to keep. Ctrl+Shift+V, or "Paste
-  HTML as Markdown" in the editor's menu, pastes formatted text of the
-  clipboard (from a browser, a word processor) as Markdown, converted by
-  pandoc; images stay links, nothing is fetched. Without formatted text on the
-  clipboard it pastes like Ctrl+V. **Mark**, beside Save, marks the selected
-  text yellow, green, blue, pink or orange; with nothing selected it recolours
-  or removes the mark at the cursor. A mark is in the file as
-  `<mark class="yellow">…</mark>`, one to a line; the preview shows the
-  colours, and the tags are not counted as words.
+  sides changed it, a bar asks which version to keep. A file opened again
+  shows where it was left, cursor and scrolling, while the window is open.
+  Ctrl+Shift+V, or "Paste HTML as Markdown" in the editor's menu, pastes
+  formatted text of the clipboard (from a browser, a word processor) as
+  Markdown, converted by pandoc; images stay links, nothing is fetched.
+  Without formatted text it pastes the plain text. **Mark**, beside Save,
+  marks the selected text yellow, green, blue, pink or orange; with nothing
+  selected it recolours or removes the mark at the cursor. A mark is in the
+  file as `<mark class="yellow">…</mark>`, one to a line, none in code; the
+  editor hides the tags, the preview shows the colours, and the tags are not
+  counted as words. With "Auto-Hide Header Bar" the editor's bars hide while
+  typing, to the agent too; the pointer at the top, a menu or the search
+  shows them, going to the tree or the agent does not.
+- **Preferences**: font and size of the editor and of the agent's terminal,
+  each with a button for the default (Fira Mono fitted to the width; the
+  system's monospace font).
 - **Agent**: a terminal running Claude Code or Codex, chosen in the pane's
   header, in the working folder. Shift+Enter breaks a line, Ctrl+Shift+C and
   Ctrl+Shift+V copy and paste.

@@ -262,6 +262,7 @@ class Buffer:
         self.steps = []
         self.paste_ongoing = False
         self.completing = []
+        self.takes_text = True
 
     def begin_user_action(self):
         self.steps.append("begin")
@@ -270,26 +271,51 @@ class Buffer:
         self.steps.append("end")
 
     def delete_selection(self, interactive, editable):
+        assert interactive and editable  # hidden tags stay
         self.steps.append("delete")
         self.text = self.text.replace(self.selection, "|")
 
-    def insert_at_cursor(self, text, length):
+    def insert_interactive_at_cursor(self, text, length, editable):
         self.steps.append("insert")
         self.completing.append(not self.paste_ongoing)
-        self.text = self.text.replace("|", text)
+        if self.takes_text:
+            self.text = self.text.replace("|", text)
+        return self.takes_text
 
     def get_insert(self):
         return "insert-mark"
 
 
 class Clipboard:
-    """A clipboard: what it offers, and how it hands its HTML over."""
+    """A clipboard: what it offers, and how it hands its HTML and its
+    plain text over."""
 
     def __init__(self, html=b"<p>a <b>b</b></p>", kinds=("text/html", "text/plain")):
         self.kinds = kinds
         self.stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(html))
         self.refuses = False
         self.asked = 0
+        self.plain = "plain"  # None: it has none to give
+        self.plain_asked = 0
+        self.held = None  # the answers about plain text it still owes
+
+    def read_text_async(self, _cancellable, callback, data):
+        self.plain_asked += 1
+        if self.held is None:
+            GLib.idle_add(lambda: callback(self, None, data) and False)
+        else:
+            self.held.append(lambda: callback(self, None, data))
+
+    def read_text_finish(self, _result):
+        if self.plain is None:
+            raise GLib.GError("no text")
+        return self.plain
+
+    def answer(self):
+        """Give the answers owed."""
+        owed, self.held = self.held, []
+        for answer in owed:
+            answer()
 
     def get_formats(self):
         return self
@@ -377,6 +403,20 @@ class PasteTest(unittest.TestCase):
             and subject.conversion is None
             and subject.timer == 0
             and subject.chunks == []
+            and subject.clipboard is None
+        )
+
+    def pasted_plain(self):
+        """The clipboard's plain text arrived, and nothing else did."""
+        buffer = self.view.buffer
+        return (
+            buffer.text == "before plain after"
+            and buffer.steps == ["begin", "delete", "insert", "end"]
+            and buffer.completing == [False]
+            and not buffer.paste_ongoing
+            and (self.view.emitted, self.view.beeps) == ([], 0)
+            and self.converter.asked == []
+            and self.idle()
         )
 
     def test_html_arrives_as_markdown_in_one_undo_step(self):
@@ -405,12 +445,31 @@ class PasteTest(unittest.TestCase):
         self.assertEqual(self.converter.asked, [html.decode()])
         self.assertEqual(self.paste.timer, 0)  # the clipboard was in time
 
-    def test_a_clipboard_without_html_is_pasted_plain_at_once(self):
+    def test_a_clipboard_without_html_gives_its_plain_text(self):
         self.clipboard.kinds = ("text/plain",)
         self.paste.paste()
-        self.assertEqual(self.view.emitted, ["paste-clipboard"])
-        self.assertEqual((self.clipboard.asked, self.view.buffer.steps), (0, []))
+        spin(lambda: self.view.buffer.steps)
+        self.assertTrue(self.pasted_plain())
+        self.assertEqual((self.clipboard.asked, self.clipboard.plain_asked), (0, 1))
+        self.assertEqual(self.view.scrolled, ["insert-mark"])
+
+    def test_a_clipboard_without_text_pastes_nothing(self):
+        self.clipboard.kinds = ("image/png",)
+        self.clipboard.plain = None
+        self.paste.paste()
+        spin(lambda: self.view.beeps)
+        self.assertTrue(self.untouched())
+        self.assertEqual(self.view.beeps, 1)
         self.assertTrue(self.idle())
+
+    def test_a_place_that_takes_no_text_gets_none(self):
+        self.view.buffer.takes_text = False  # between two hidden tags
+        self.clipboard.kinds = ("text/plain",)
+        self.paste.paste()
+        spin(lambda: self.view.beeps)
+        self.assertEqual(self.view.buffer.text, "before | after")
+        self.assertEqual(self.view.beeps, 1)
+        self.assertFalse(self.view.buffer.paste_ongoing)
 
     def test_an_editor_that_takes_no_text_gets_none(self):
         self.view.editable = False
@@ -422,36 +481,88 @@ class PasteTest(unittest.TestCase):
     def test_html_the_clipboard_does_not_hand_over_is_pasted_plain(self):
         self.clipboard.refuses = True
         self.paste.paste()
-        spin(lambda: self.view.emitted)
-        self.assertEqual(self.view.emitted, ["paste-clipboard"])
-        self.assertEqual(self.converter.asked, [])
-        self.assertTrue(self.idle())
+        spin(lambda: self.view.buffer.steps)
+        self.assertTrue(self.pasted_plain())
 
     def test_html_that_breaks_off_is_pasted_plain(self):
         self.clipboard.stream.close(None)  # every read of it fails
         self.paste.paste()
-        spin(lambda: self.view.emitted)
-        self.assertEqual(self.view.emitted, ["paste-clipboard"])
-        self.assertEqual(self.converter.asked, [])
-        self.assertTrue(self.idle())
+        spin(lambda: self.view.buffer.steps)
+        self.assertTrue(self.pasted_plain())
 
     def test_more_html_than_pandoc_is_given_is_pasted_plain(self):
         with mock.patch.object(paste, "MAX_HTML_BYTES", 5):
             self.paste.paste()
-            spin(lambda: self.view.emitted)
-        self.assertEqual(self.view.emitted, ["paste-clipboard"])
-        self.assertEqual(self.converter.asked, [])
-        self.assertTrue(self.idle())
+            spin(lambda: self.view.buffer.steps)
+        self.assertTrue(self.pasted_plain())
         self.assertTrue(self.clipboard.stream.is_closed())
 
     def test_html_pandoc_cannot_convert_is_pasted_plain(self):
         self.paste.paste()
         spin(lambda: self.converter.asked)
         self.converter.done(paste.FAILED, None)
-        self.assertEqual(self.view.emitted, ["paste-clipboard"])
-        self.assertEqual((self.view.buffer.steps, self.view.beeps), ([], 0))
-        self.assertTrue(self.idle())
+        self.assertTrue(self.untouched())  # the plain text is on its way
+        self.assertFalse(self.idle())
+        spin(lambda: self.view.buffer.steps)
+        self.converter.asked.clear()
+        self.assertTrue(self.pasted_plain())
         self.assertEqual(self.converter.cancelled, 0)
+
+    def test_plain_text_arrives_only_where_it_was_asked_for(self):
+        # asked for at once, and after HTML that pandoc cannot convert
+        for kinds in (("text/plain",), ("text/html", "text/plain")):
+            self.clipboard = self.view.clipboard = Clipboard(kinds=kinds)
+            self.clipboard.held = []
+            self.document[0] = "file:///book/one.md"
+            self.paste.paste()
+            if "text/html" in kinds:
+                spin(lambda: self.converter.asked)
+                self.converter.done(paste.FAILED, None)
+                self.converter.asked.clear()
+            self.assertEqual(self.clipboard.plain_asked, 1)
+            self.document[0] = "file:///book/two.md"  # the window turned to it
+            self.clipboard.answer()
+            self.assertTrue(self.untouched(), kinds)
+            self.assertTrue(self.idle())
+        self.assertEqual(self.view.beeps, 2)
+
+    def test_plain_text_that_comes_too_late_is_not_pasted(self):
+        self.clipboard.kinds = ("text/plain",)
+        self.clipboard.held = []
+        with mock.patch.object(paste, "READ_SECONDS", 0.2):
+            self.paste.paste()
+            spin(lambda: self.view.beeps)
+        self.assertTrue(self.idle())
+        self.clipboard.answer()  # now it comes, to no one
+        self.assertTrue(self.untouched())
+        self.assertEqual(self.view.beeps, 1)
+        self.clipboard.held = None
+        self.paste.paste()  # the next one is not held up
+        spin(lambda: self.view.buffer.steps)
+        self.assertEqual(self.view.buffer.text, "before plain after")
+
+    def test_a_window_that_closes_gets_no_plain_text(self):
+        self.clipboard.kinds = ("text/plain",)
+        self.clipboard.held = []
+        self.paste.paste()
+        self.paste.close()
+        self.clipboard.answer()
+        self.assertTrue(self.untouched())
+        self.assertEqual(self.view.beeps, 0)
+        self.assertTrue(self.idle())
+
+    def test_the_time_for_the_plain_text_begins_when_it_is_asked_for(self):
+        self.clipboard.held = []
+        with mock.patch.object(paste, "READ_SECONDS", 0.4):
+            self.paste.paste()
+            spin(lambda: self.converter.asked)
+            self.assertEqual(self.paste.timer, 0)  # pandoc has its own
+            settle(0.3)
+            self.converter.done(paste.FAILED, None)
+            settle(0.3)  # more than the time since the paste began
+            self.assertEqual(self.view.beeps, 0)
+            self.clipboard.answer()
+        self.assertEqual(self.view.buffer.text, "before plain after")
 
     def test_a_conversion_that_took_too_long_pastes_nothing(self):
         self.paste.paste()
