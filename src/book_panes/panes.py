@@ -24,7 +24,7 @@ gi.require_version("Vte", "3.91")
 from apostrophe import config
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango, Vte
 
-from . import APP_ID, agents, channel, engines
+from . import APP_ID, agents, channel, engines, paste
 from .folders import (
     ATTRIBUTES,
     FolderListing,
@@ -511,6 +511,8 @@ class BookPanes:
     def _connect_editor(self):
         window = self.window
         window.textview.get_buffer().connect("changed", self._on_text_changed)
+        self.markdown_paste = paste.MarkdownPaste(window.textview, self._document)
+        paste.install(window.textview, self.markdown_paste)
         window.connect("destroy", self.close)
         # the file monitor can be late or unavailable; a stat a second is cheap
         self.disk_poll_timer = GLib.timeout_add_seconds(
@@ -527,6 +529,7 @@ class BookPanes:
         self.closed = True
         OPEN_PANES.discard(self)
         self.wanted = None
+        self.markdown_paste.close()
         for name in (
             "autosave_timer",
             "sync_timer",
@@ -553,6 +556,11 @@ class BookPanes:
         if self.agent is not None:
             end_agent(self.agent)
             self.agent = None
+
+    def _document(self):
+        """What tells the document in the editor from another."""
+        gfile = self.window.current.gfile
+        return self.window.loaded_uri, gfile.get_uri() if gfile is not None else None
 
     def _buffer_matches_file(self):
         window = self.window

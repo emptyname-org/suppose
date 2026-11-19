@@ -8,7 +8,11 @@ agent's terminal on the right.
   opens another folder.
 - **Editor**: Apostrophe. Edits are saved after a second of rest, on switching
   files and on closing. A file the agent changes on disk is reloaded; when both
-  sides changed it, a bar asks which version to keep.
+  sides changed it, a bar asks which version to keep. Ctrl+Shift+V, or "Paste
+  HTML as Markdown" in the editor's menu, pastes formatted text of the
+  clipboard (from a browser, a word processor) as Markdown, converted by
+  pandoc; images stay links, nothing is fetched. Without formatted text on the
+  clipboard it pastes like Ctrl+V.
 - **Agent**: a terminal running Claude Code or Codex, chosen in the pane's
   header, in the working folder. Shift+Enter breaks a line, Ctrl+Shift+C and
   Ctrl+Shift+V copy and paste.

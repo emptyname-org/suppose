@@ -28,7 +28,7 @@ Gio.Resource._register(
 from apostrophe import helpers  # after the resources: it loads widgets
 from apostrophe.application import Application
 
-from book_panes import agents, channel, engines, folders, panes
+from book_panes import agents, channel, engines, folders, panes, paste
 
 WATCHING = os.environ.get("SMOKE_WATCH") != "0"
 if not WATCHING:  # as with the inotify limit reached
@@ -80,6 +80,43 @@ def terminal_is_light(book):
 def append(window, text):
     buffer = window.textview.get_buffer()
     buffer.insert(buffer.get_end_iter(), text)
+
+
+CLIPBOARD_OWNER = """
+import sys
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gdk, GLib, Gtk
+Gtk.init()
+kinds = iter(sys.argv[1:])
+offers = [
+    Gdk.ContentProvider.new_for_bytes(kind, GLib.Bytes.new(text.encode()))
+    for kind, text in zip(kinds, kinds)
+]
+Gdk.Display.get_default().get_clipboard().set_content(
+    Gdk.ContentProvider.new_union(offers)
+)
+GLib.MainLoop().run()
+"""
+
+
+def own_clipboard(*offers):
+    """Another program takes the clipboard: kind, text, kind, text ..."""
+    return subprocess.Popen([sys.executable, "-c", CLIPBOARD_OWNER, *offers])
+
+
+def paste_shortcut(view):
+    """The action Ctrl+Shift+V has on the view, or None."""
+    wanted = Gtk.ShortcutTrigger.parse_string(paste.ACCELERATOR)
+    controllers = view.observe_controllers()
+    for index in range(controllers.get_n_items()):
+        controller = controllers.get_item(index)
+        if isinstance(controller, Gtk.ShortcutController):
+            for place in range(controller.get_n_items()):
+                shortcut = controller.get_item(place)
+                if wanted.equal(shortcut.get_trigger()):
+                    return shortcut.get_action()
+    return None
 
 
 def runs(pid):
@@ -270,6 +307,60 @@ def scenario(app):
     check(
         "autosave: edit on disk",
         read(CH1) == CH1_TEXT + "typed\n" and not window.did_change,
+    )
+
+    # formatted text of another program's clipboard arrives as Markdown
+    view = window.textview
+    buffer = view.get_buffer()
+    typed = CH1_TEXT + "typed\n"
+    owner = own_clipboard(
+        "text/html",
+        "<h2>Title</h2><ul><li>one</li><li><em>two</em></li></ul><pre>x *y*</pre>",
+        "text/plain;charset=utf-8",
+        "Title\none\ntwo\nx *y*",
+    )
+    yield 2500
+    check(
+        "paste: another program's clipboard offers HTML",
+        view.get_clipboard().get_formats().contain_mime_type("text/html"),
+    )
+    buffer.place_cursor(buffer.get_end_iter())
+    view.activate_action("book." + paste.ACTION, None)
+    yield 1500
+    check(
+        "paste: HTML arrives as Markdown",
+        view.get_text() == typed + "## Title\n\n- one\n- *two*\n\n```\nx *y*\n```",
+    )
+    buffer.undo()
+    check("paste: one undo step takes it back", view.get_text() == typed)
+    owner.kill()
+    owner.wait()
+    owner = own_clipboard("text/plain;charset=utf-8", "plain *text*")
+    yield 2500
+    shortcut = paste_shortcut(view)
+    check("paste: Ctrl+Shift+V is the editor's", shortcut is not None)
+    if shortcut is not None:
+        shortcut.activate(Gtk.ShortcutActionFlags.EXCLUSIVE, view, None)
+    yield 1000
+    check(
+        "paste: without HTML the plain text arrives",
+        view.get_text() == typed + "plain *text*",
+    )
+    buffer.undo()
+    owner.kill()
+    owner.wait()
+    menu = view.get_extra_menu()
+    label = menu.get_item_attribute_value(0, "label", None)
+    check(
+        "paste: in the editor's menu, above the spelling",
+        label is not None
+        and label.get_string() == paste.LABEL
+        and menu.get_n_items() == 2,
+    )
+    yield 1900
+    check(
+        "paste: undone, the file is as before",
+        view.get_text() == typed and read(CH1) == typed and not window.did_change,
     )
 
     yield 800  # the file monitor comes back 500 ms after a save

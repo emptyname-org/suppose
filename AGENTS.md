@@ -10,7 +10,8 @@
 - `src/book_panes/`: panes, folders, channel (editor side), client (agent
   side), agents (ending the agent process), engines (Claude Code and Codex,
   the folder's conversations), mcp (the channel as Codex's tools), choose
-  (folder dialog of the launcher). `src/bin/`: launcher and agent tools.
+  (folder dialog of the launcher), paste (the clipboard's HTML as Markdown,
+  through pandoc and `paste.lua`). `src/bin/`: launcher and agent tools.
   `assets/`: menu entry and icons. `tests/` mirrors `src/`; `tests/smoke/`
   drives the built editor. `tools/`: build and audit.
 - Tests never run a real engine and never touch the engines' real homes.
