@@ -34,6 +34,7 @@ from .folders import (
 )
 
 MAX_OPEN_BYTES = 5 * 1024 * 1024
+OPEN_CLASS = "book-open"  # on what the tree's row of the open file holds
 AUTOSAVE_MS = 1000
 SYNC_DEBOUNCE_MS = 150
 DISK_POLL_SECONDS = 1
@@ -74,7 +75,12 @@ TERMINAL_COLORS = {
 
 CSS = """
 vte-terminal.book-terminal { padding: 10px 12px; }
-.book-tree row { min-height: 30px; }
+.book-tree row { min-height: 30px; padding: 0; }
+.book-tree row > treeexpander { padding: 0 8px; border-radius: 6px; }
+.book-tree row > treeexpander.book-open {
+  background-color: alpha(@accent_bg_color, 0.25);
+  font-weight: bold;
+}
 .book-pane { background-color: @window_bg_color; }
 """
 
@@ -227,6 +233,7 @@ class BookPanes:
         self.spawning = None  # cancellable of a start under way
         self.restart_pending = False  # the agent was told to go, start anew
         self.closed = False
+        self.current_handler = 0
         self.wanted = None  # file asked for, shown once edits are saved
         self.autosave_timer = 0
         self.sync_timer = 0
@@ -276,14 +283,16 @@ class BookPanes:
         self.tree_model = Gtk.TreeListModel.new(
             self._folder_model(self.root), False, False, self._child_model
         )
-        self.selection = Gtk.SingleSelection(
-            model=self.tree_model, autoselect=False, can_unselect=True
-        )
+        # No selection: with a click that opens, GTK selects what the
+        # pointer is over. The row that stands out is the open file's.
+        self.tree_rows = Gtk.NoSelection(model=self.tree_model)
+        self.shown_rows = set()  # the list items that show a row now
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._setup_row)
         factory.connect("bind", self._bind_row)
+        factory.connect("unbind", self._unbind_row)
         self.list_view = Gtk.ListView(
-            model=self.selection, factory=factory, single_click_activate=True
+            model=self.tree_rows, factory=factory, single_click_activate=True
         )
         self.list_view.add_css_class("navigation-sidebar")
         self.list_view.add_css_class("book-tree")
@@ -487,9 +496,37 @@ class BookPanes:
                 "folder-symbolic" if is_directory(info) else "text-x-generic-symbolic"
             )
         box.get_last_child().set_text(info.get_display_name())
+        self.shown_rows.add(item)
+        self._show_open_row(item, self._open_uri())
+
+    def _unbind_row(self, _factory, item):
+        self.shown_rows.discard(item)
+        self._show_open_row(item, None)
+
+    def _open_uri(self):
+        gfile = self.window.current.gfile
+        return gfile.get_uri() if gfile is not None else None
+
+    def _show_open_row(self, item, uri):
+        """The row stands out when it is the file with this URI. By what it
+        holds: the list's own widget for a row is not ours to touch (new, it
+        is not yet the list's, and a look at it from here would end it)."""
+        row = item.get_item()
+        info = row.get_item() if row is not None else None
+        gfile = info.get_attribute_object("standard::file") if info else None
+        if uri is not None and gfile is not None and gfile.get_uri() == uri:
+            item.get_child().add_css_class(OPEN_CLASS)
+        else:
+            item.get_child().remove_css_class(OPEN_CLASS)
+
+    def _show_open(self, *_args):
+        """The file in the editor changed: its row stands out, no other."""
+        uri = self._open_uri()
+        for item in self.shown_rows:
+            self._show_open_row(item, uri)
 
     def _on_row_activated(self, _view, position):
-        row = self.selection.get_item(position)
+        row = self.tree_rows.get_item(position)
         if row is None:
             return
         info = row.get_item()
@@ -511,6 +548,8 @@ class BookPanes:
     def _connect_editor(self):
         window = self.window
         window.textview.get_buffer().connect("changed", self._on_text_changed)
+        self.current_handler = window.current.connect("notify::gfile", self._show_open)
+        self._show_open()
         actions = Gio.SimpleActionGroup()  # book.NAME, wherever in the window
         window.insert_action_group("book", actions)
         self.markdown_paste = paste.MarkdownPaste(window.textview, self._document)
@@ -537,6 +576,9 @@ class BookPanes:
         self.wanted = None
         self.markdown_paste.close()
         self.marker.close()
+        if self.current_handler:
+            self.window.current.disconnect(self.current_handler)
+            self.current_handler = 0
         for name in (
             "autosave_timer",
             "sync_timer",
@@ -550,6 +592,7 @@ class BookPanes:
         for listing in self.listings.values():
             listing.close()
         self.listings.clear()
+        self.shown_rows.clear()
         if self.channel is not None:
             self.channel.close()
             self.channel = None

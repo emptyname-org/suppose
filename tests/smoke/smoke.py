@@ -70,6 +70,15 @@ def tree_names(book):
     ]
 
 
+def open_rows(book):
+    """The names of the tree's rows that stand out as the open file."""
+    return sorted(
+        item.get_item().get_item().get_display_name()
+        for item in book.shown_rows
+        if item.get_child().has_css_class(panes.OPEN_CLASS)
+    )
+
+
 def terminal_text(book):
     text = book.terminal.get_text_format(Vte.Format.TEXT)
     return text[0] if isinstance(text, tuple) else text
@@ -324,6 +333,19 @@ def scenario(app):
         and not window.did_change,
     )
     check("open: file not rewritten", os.stat(CH1).st_mtime_ns == mtime)
+    check(
+        "tree: the open file's row stands out, no other", open_rows(book) == ["ch1.md"]
+    )
+    rows = book.list_view.get_model()
+    for position in range(rows.get_n_items()):  # what the pointer over a row asks
+        book.list_view.activate_action(
+            "list.select-item", GLib.Variant("(ubb)", (position, False, False))
+        )
+    check(
+        "tree: the pointer over a row selects nothing",
+        not any(rows.is_selected(position) for position in range(rows.get_n_items()))
+        and open_rows(book) == ["ch1.md"],
+    )
 
     append(window, "typed\n")
     check("edit: marked changed", window.did_change)
@@ -521,6 +543,21 @@ def scenario(app):
         read(CH1) == "from agent\nmine\nmore\nlate\n"
         and window.textview.get_text() == CH2_TEXT
         and window.loaded_uri == ch2.get_uri(),
+    )
+    check(
+        "tree: the row that stands out follows the editor",
+        open_rows(book) == ["ch2.md"],
+    )
+    book.tree_model.get_item(0).set_expanded(False)
+    yield 400
+    check(
+        "tree: no row stands out with the file's folder closed", open_rows(book) == []
+    )
+    book.tree_model.get_item(0).set_expanded(True)
+    yield 800
+    check(
+        "tree: opened again, the folder shows the open file",
+        open_rows(book) == ["ch2.md"],
     )
 
     # P1-2: a save asked for while a write is in flight waits its turn

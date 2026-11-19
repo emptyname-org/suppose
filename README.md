@@ -5,7 +5,7 @@ for writing a book with an AI agent: the book's folder tree on the left, the
 agent's terminal on the right.
 
 - **Tree**: the working folder. A click opens a text file; the folder button
-  opens another folder.
+  opens another folder. The open file is highlighted.
 - **Editor**: Apostrophe. Edits are saved after a second of rest, on switching
   files and on closing. A file the agent changes on disk is reloaded; when both
   sides changed it, a bar asks which version to keep. Ctrl+Shift+V, or "Paste
