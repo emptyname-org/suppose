@@ -332,13 +332,12 @@ class MarkdownPaste:
         self.started_in = None
 
 
-def install(view, paste):
-    """Ctrl+Shift+V on the view and an entry in its menu, for paste."""
+def install(view, group, paste):
+    """Ctrl+Shift+V on the view and an entry in its menu, for paste; the
+    action goes into the group, which the view finds as "book"."""
     action = Gio.SimpleAction.new(ACTION, None)
     action.connect("activate", lambda *_args: paste.paste())
-    group = Gio.SimpleActionGroup()
     group.add_action(action)
-    view.insert_action_group("book", group)
     shortcuts = Gtk.ShortcutController()
     shortcuts.add_shortcut(
         Gtk.Shortcut.new(

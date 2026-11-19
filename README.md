@@ -12,7 +12,11 @@ agent's terminal on the right.
   HTML as Markdown" in the editor's menu, pastes formatted text of the
   clipboard (from a browser, a word processor) as Markdown, converted by
   pandoc; images stay links, nothing is fetched. Without formatted text on the
-  clipboard it pastes like Ctrl+V.
+  clipboard it pastes like Ctrl+V. **Mark**, beside Save, marks the selected
+  text yellow, green, blue, pink or orange; with nothing selected it recolours
+  or removes the mark at the cursor. A mark is in the file as
+  `<mark class="yellow">…</mark>`, one to a line; the preview shows the
+  colours, and the tags are not counted as words.
 - **Agent**: a terminal running Claude Code or Codex, chosen in the pane's
   header, in the working folder. Shift+Enter breaks a line, Ctrl+Shift+C and
   Ctrl+Shift+V copy and paste.

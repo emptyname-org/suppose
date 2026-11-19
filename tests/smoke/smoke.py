@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 
 import gi
 
@@ -27,8 +28,9 @@ Gio.Resource._register(
 
 from apostrophe import helpers  # after the resources: it loads widgets
 from apostrophe.application import Application
+from apostrophe.preview_security import PreviewSecurity, PreviewSecurityHandler
 
-from book_panes import agents, channel, engines, folders, panes, paste
+from book_panes import agents, channel, engines, folders, marks, panes, paste
 
 WATCHING = os.environ.get("SMOKE_WATCH") != "0"
 if not WATCHING:  # as with the inotify limit reached
@@ -117,6 +119,28 @@ def paste_shortcut(view):
                 if wanted.equal(shortcut.get_trigger()):
                     return shortcut.get_action()
     return None
+
+
+def mark_rows(button):
+    """The rows of the Mark menu: what each tells its action, to the row."""
+    rows = {}
+    row = button.get_popover().get_child().get_first_child()
+    while row is not None:
+        if isinstance(row, Gtk.Button):
+            target = row.get_action_target_value()
+            rows[target.get_string() if target is not None else None] = row
+        row = row.get_next_sibling()
+    return rows
+
+
+def preview_asks(window, text):
+    """What the preview makes of a file with this text: ask, or show it."""
+    asked = SimpleNamespace(
+        settings=window.preview_security_handler.settings,
+        window=SimpleNamespace(current=SimpleNamespace(security_level=None)),
+    )
+    PreviewSecurityHandler.assert_security_risk(asked, text)
+    return asked.window.current.security_level == PreviewSecurity.ASK
 
 
 def runs(pid):
@@ -361,6 +385,84 @@ def scenario(app):
     check(
         "paste: undone, the file is as before",
         view.get_text() == typed and read(CH1) == typed and not window.did_change,
+    )
+
+    # text marked in a colour from the Mark menu beside Save
+    def select(part):
+        at = view.get_text().index(part)
+        buffer.select_range(
+            buffer.get_iter_at_offset(at), buffer.get_iter_at_offset(at + len(part))
+        )
+
+    def painted(part):
+        at = view.get_text().index(part)
+        tags = buffer.get_iter_at_offset(at).get_tags()
+        return [tag.get_property("name") for tag in tags if tag.get_property("name")]
+
+    rows = mark_rows(book.mark_button)
+    beside = book.mark_button.get_prev_sibling()
+    check(
+        "mark: the menu stands beside Save, a row to a colour",
+        book.mark_button.get_label() == "_Mark"
+        and beside is not None
+        and beside.get_label() == "_Save"
+        and list(rows) == [*marks.COLORS, None]
+        and all(row.get_sensitive() for row in rows.values()),
+    )
+    yellow = typed.replace(
+        "First chapter.", marks.opening("yellow") + "First chapter.</mark>"
+    )
+    select("First chapter.")
+    rows["yellow"].emit("clicked")
+    bounds = buffer.get_selection_bounds()
+    check(
+        "mark: the selection is marked and stays selected",
+        view.get_text() == yellow
+        and len(bounds) == 2
+        and buffer.get_text(*bounds, True) == "First chapter.",
+    )
+    check(
+        "mark: painted, its tags dimmed",
+        painted("First") == ["book-mark-yellow"]
+        and "book-mark-tag" in painted("<mark")
+        and "book-mark-tag" in painted("</mark>"),
+    )
+    converted: list[str] = []
+    window.preview_handler.preview_converter.convert(yellow, True, converted.append)
+    yield 1900
+    check("mark: saved with the file", read(CH1) == yellow and not window.did_change)
+    check(
+        "mark: its tags are no words",
+        window.editor.stats_handler.words == 4,
+    )
+    check(
+        "mark: shown by the preview that leaves HTML out",
+        len(converted) == 1
+        and '<span class="mark-yellow">First chapter.</span>' in converted[0],
+    )
+    check(
+        "mark: the preview asks about other HTML only",
+        not preview_asks(window, yellow) and preview_asks(window, yellow + "<b>x</b>"),
+    )
+    buffer.undo()
+    check("mark: one undo step takes it back", view.get_text() == typed)
+    buffer.redo()
+    buffer.place_cursor(buffer.get_iter_at_offset(yellow.index("chapter")))
+    window.activate_action("book." + marks.ACTION, GLib.Variant("s", "green"))
+    check(
+        "mark: at the cursor it takes another colour",
+        view.get_text() == yellow.replace("yellow", "green")
+        and painted("First") == ["book-mark-green"],
+    )
+    rows[None].emit("clicked")
+    check(
+        "mark: removed",
+        view.get_text() == typed and painted("First") == [],
+    )
+    yield 1900
+    check(
+        "mark: removed, the file is as before",
+        read(CH1) == typed and not window.did_change,
     )
 
     yield 800  # the file monitor comes back 500 ms after a save

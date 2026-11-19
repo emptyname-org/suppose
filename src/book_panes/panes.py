@@ -24,7 +24,7 @@ gi.require_version("Vte", "3.91")
 from apostrophe import config
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango, Vte
 
-from . import APP_ID, agents, channel, engines, paste
+from . import APP_ID, agents, channel, engines, marks, paste
 from .folders import (
     ATTRIBUTES,
     FolderListing,
@@ -254,7 +254,7 @@ class BookPanes:
 
     def _install_css(self):
         provider = Gtk.CssProvider()
-        provider.load_from_string(CSS)
+        provider.load_from_string(CSS + marks.CSS)
         Gtk.StyleContext.add_provider_for_display(
             self.window.get_display(),
             provider,
@@ -511,8 +511,14 @@ class BookPanes:
     def _connect_editor(self):
         window = self.window
         window.textview.get_buffer().connect("changed", self._on_text_changed)
+        actions = Gio.SimpleActionGroup()  # book.NAME, wherever in the window
+        window.insert_action_group("book", actions)
         self.markdown_paste = paste.MarkdownPaste(window.textview, self._document)
-        paste.install(window.textview, self.markdown_paste)
+        paste.install(window.textview, actions, self.markdown_paste)
+        self.marker = marks.Marker(window.textview)
+        marks.install(actions, self.marker)
+        self.mark_button = marks.menu_button("book")
+        window.headerbar.headerbar.pack_start(self.mark_button)  # beside Save
         window.connect("destroy", self.close)
         # the file monitor can be late or unavailable; a stat a second is cheap
         self.disk_poll_timer = GLib.timeout_add_seconds(
@@ -530,6 +536,7 @@ class BookPanes:
         OPEN_PANES.discard(self)
         self.wanted = None
         self.markdown_paste.close()
+        self.marker.close()
         for name in (
             "autosave_timer",
             "sync_timer",
