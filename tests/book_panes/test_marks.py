@@ -12,6 +12,7 @@ from gi.repository import Gio, GLib, GObject, Gtk
 from book_panes import marks
 
 Y, G, END = '<mark class="yellow">', '<mark class="green">', "</mark>"
+HIDDEN = ("book-mark-tag",)
 
 
 def marked(text, color):
@@ -138,6 +139,51 @@ class PlanTest(unittest.TestCase):
     def test_a_text_without_marks_asks_for_nothing(self):
         for text in ("", "plain", f"{Y}open", f"`{Y}a{END}`"):
             self.assertFalse(any(marks.plan(text).values()), text)
+
+
+class PlanLinksTest(unittest.TestCase):
+    TEXT = "see [the page](http://e.org) now"
+
+    def test_the_editor_hides_the_markup_of_links_and_colours_their_words(self):
+        shown = marks.plan(self.TEXT)
+        self.assertEqual(shown["hide"], [(4, 5), (13, 28)])
+        self.assertEqual(shown["link"], [(5, 13)])
+
+    def test_a_link_the_cursor_is_in_keeps_its_markup(self):
+        for cursor in ((4, 4), (9, 9), (28, 28), (6, 20)):
+            shown = marks.plan(self.TEXT, cursor)
+            self.assertEqual((shown["hide"], shown["link"]), ([], [(5, 13)]), cursor)
+        for cursor in ((3, 3), (29, 29), (2, 9), (9, 30)):
+            self.assertEqual(marks.plan(self.TEXT, cursor)["hide"], [(4, 5), (13, 28)])
+
+    def test_tags_and_markup_side_by_side_are_one_stretch(self):
+        text = f"{Y}[x](u){END}"
+        self.assertEqual(
+            marks.plan(text)["hide"], [(0, len(Y) + 1), (len(Y) + 2, len(text))]
+        )
+        self.assertEqual(marks.plan(text)["yellow"], [(len(Y), len(text) - len(END))])
+
+    def test_images_and_code_keep_theirs(self):
+        self.assertEqual(marks.plan("![a](p.png) `[b](u)`")["hide"], [])
+
+
+class HiddenPiecesTest(unittest.TestCase):
+    def test_a_hidden_stretch_is_read_piece_by_piece(self):
+        text = f"](u){END}{Y}[x<mar"
+        self.assertEqual(
+            [
+                (text[a:b], kind, opens)
+                for a, b, kind, opens in marks.hidden_pieces(text)
+            ],
+            [
+                ("](u)", "link", False),
+                (END, "mark", False),
+                (Y, "mark", True),
+                ("[", "link", True),
+                ("x<mar", None, False),
+            ],
+        )
+        self.assertEqual(marks.hidden_pieces(""), [])
 
 
 class PreviewTest(unittest.TestCase):
@@ -591,6 +637,20 @@ class Loading(Gtk.TextBuffer):
         self.end_irreversible_action()
 
 
+class Completing(Gtk.TextBuffer):
+    """Begins a new line itself, later, where one is typed and not
+    pasted: as Apostrophe's buffer does, for its lists."""
+
+    paste_ongoing = GObject.Property(type=bool, default=False)
+    later = 0
+
+    def do_insert_text(self, position, text, length):
+        if text == "\n" and not self.paste_ongoing:
+            self.later += 1
+        else:
+            Gtk.TextBuffer.do_insert_text(self, position, text, length)
+
+
 def spin(seconds):
     loop = GLib.MainLoop()
     GLib.timeout_add(int(seconds * 1000), loop.quit)
@@ -917,17 +977,34 @@ class MarkerTest(unittest.TestCase):
         self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
         self.assertEqual(self.text(), "a  b")
 
-    def test_words_with_no_tag_in_the_way_are_left_to_the_editor(self):
+    def test_a_word_with_no_tag_in_it_is_deleted_as_it_shows_too(self):
         self.editor(f"{Y}one{END} two three")
         self.put(len(self.text()))
         self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
-        self.assertEqual(self.view.defaults, ["delete-from-cursor"])
+        self.assertEqual(self.text(), f"{Y}one{END} two ")
+        self.assertEqual(self.view.defaults, [])  # a tag in its line shifts its ends
         self.assertEqual(self.plain.tried, [("one two three", 13)])
+
+    def test_a_text_that_hides_nothing_is_left_to_the_editor(self):
         self.editor("one two three")
         self.put(13)
         self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
         self.assertEqual(self.view.defaults, ["delete-from-cursor"])
-        self.assertEqual(self.plain.tried, [])  # no marks, nothing to ask
+        self.assertEqual(self.plain.tried, [])
+
+    def test_a_word_behind_empty_lines_is_found(self):
+        self.editor(f"{Y}one{END}\n\n\n{G}two{END}")
+        self.put(END)
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
+        self.assertEqual(self.text(), f"{Y}one{END}")
+        # the lines at hand held blanks alone, no word
+        self.assertEqual(self.plain.tried, [("one\n\n\n", 3), ("one\n\n\ntwo", 3)])
+
+    def test_several_words_are_looked_for_in_the_whole_text(self):
+        self.editor(f"{Y}one{END} two" + "\n" * 6 + "three")
+        self.put(0)
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 2)
+        self.assertEqual(self.plain.tried, [("one two" + "\n" * 6 + "three", 0)])
 
     def test_a_word_far_from_the_cursor_is_found(self):
         self.editor(f"zero\n{Y}one{END}{G}two{END}" + "\n" * 6)
@@ -938,12 +1015,28 @@ class MarkerTest(unittest.TestCase):
             self.plain.tried, [("\n\n", 2), ("zero\nonetwo\n\n\n\n\n\n", 17)]
         )
 
-    def test_nothing_to_delete_is_left_to_the_editor(self):
+    def test_where_no_word_is_nothing_is_deleted(self):
         self.editor(f"{Y}one{END}")
         self.put(END)
         self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
         self.assertEqual(self.text(), f"{Y}one{END}")
-        self.assertEqual(self.view.defaults, ["delete-from-cursor"])
+        self.assertEqual(self.view.defaults, [])
+        self.assertEqual(self.plain.tried, [("one", 3)])  # asked once
+
+    def test_what_undo_puts_back_is_completed_by_nobody(self):
+        text = f"{Y}one{END}\nmore"
+        self.editor(text, Completing())
+        self.put("more")
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.assertEqual(self.text(), "more")
+        self.buffer.undo()
+        self.assertEqual((self.text(), self.buffer.later), (text, 0))
+        self.assertFalse(self.buffer.paste_ongoing)
+        self.buffer.redo()
+        self.assertEqual((self.text(), self.buffer.later), ("more", 0))
+        self.buffer.paste_ongoing = True  # a paste under way stays one
+        self.buffer.undo()
+        self.assertTrue(self.buffer.paste_ongoing)
 
     def test_no_word_is_deleted_where_nothing_may_be(self):
         text = f"{Y}one{END}{G}two{END}"
@@ -1099,3 +1192,194 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(
             self.text(), f"{Y}one{END}\n- {Y}a{END}\n- {Y}b{END}\n- a\n- b"
         )
+
+    # ---- links -----------------------------------------------------------------
+
+    LINK = "see [the page](http://e.org) now"
+
+    def test_a_link_shows_its_words_in_blue_and_hides_the_rest(self):
+        self.editor(self.LINK)
+        self.put(0)
+        self.assertEqual(self.shown(), "see the page now")
+        self.assertEqual(self.painted("the page"), {("book-link",)})
+        self.assertEqual(self.painted("[") | self.painted("](http://e.org)"), {HIDDEN})
+        self.assertEqual(self.painted("see "), {()})
+
+    def test_the_cursor_in_a_link_shows_it_as_written(self):
+        self.editor(self.LINK)
+        for place in ("[", "page", "](", "e.org", " now"):  # its ends are of it
+            self.put(0)
+            self.assertEqual(self.shown(), "see the page now")
+            self.put(place)
+            self.assertEqual(self.shown(), self.LINK, place)
+            self.assertEqual(self.painted("the page"), {("book-link",)})
+        self.put("now")
+        self.assertEqual(self.shown(), "see the page now")
+        self.assertEqual(self.marker.open, [])
+
+    def test_a_selection_in_a_link_shows_it_and_one_across_it_does_not(self):
+        self.editor(self.LINK)
+        self.select("http://e.org")
+        self.assertEqual(self.shown(), self.LINK)
+        self.select("ee [the page](http://e.org) n")
+        self.assertEqual(self.shown(), "see the page now")
+        self.select("page](http://e.org) n")  # from within it
+        self.assertEqual(self.shown(), "see the page now")
+
+    def test_where_two_links_meet_both_show(self):
+        text = "[a](u)[b](v) c"
+        self.editor(text)
+        self.put("[b]")
+        self.assertEqual(self.shown(), text)
+        self.put("b")
+        self.assertEqual(self.shown(), "a[b](v) c")
+
+    def test_what_is_typed_at_the_ends_of_a_link_is_outside_it(self):
+        self.editor("see [the page](u)")
+        self.assertEqual(self.shown(), "see [the page](u)")  # the cursor is at its end
+        self.assertTrue(self.view.type("."))
+        self.put(4)
+        self.assertTrue(self.view.type("("))
+        self.assertEqual(self.text(), "see ([the page](u).")
+        self.put(0)
+        self.assertEqual(self.shown(), "see (the page.")
+
+    def test_a_link_that_is_written_shows_when_the_cursor_leaves_it(self):
+        self.editor("see ")
+        for key in "[it](u":
+            self.assertTrue(self.view.type(key))
+        self.assertEqual(self.painted("it"), {()})  # no link yet
+        self.assertTrue(self.view.type(")"))
+        self.assertEqual(self.shown(), "see [it](u)")
+        self.assertEqual(self.painted("it"), {("book-link",)})
+        self.assertTrue(self.view.type(" "))
+        self.assertEqual(self.shown(), "see it ")
+
+    def test_a_line_broken_in_a_link_leaves_no_link(self):
+        self.editor(self.LINK)
+        self.put("page")
+        self.view.enter()
+        self.put(0)
+        self.assertEqual(self.shown(), self.text())
+        self.assertEqual(self.painted("page"), {()})
+
+    def test_a_link_goes_with_the_last_of_its_words(self):
+        self.editor("see [the page](u) now")
+        self.select("e [the page](u) n")  # as it shows: "e the page n"
+        self.view.emit("backspace")
+        self.assertEqual(self.text(), "seow")
+        self.buffer.undo()  # one step
+        self.assertEqual(self.text(), "see [the page](u) now")
+        self.select("[the page](u) n")
+        self.assertTrue(self.view.type("-"))
+        self.assertEqual(self.text(), "see -ow")
+
+    def test_part_of_a_link_deleted_leaves_the_rest_a_link(self):
+        self.editor("see [the page](u) now")
+        self.select("page](u) n")
+        self.view.emit("backspace")
+        self.assertEqual(self.text(), "see [the ](u)ow")
+        self.select("ee [th")
+        self.view.emit("backspace")
+        self.assertEqual(self.text(), "s[e ](u)ow")
+
+    def test_a_link_in_a_mark_goes_with_it(self):
+        self.editor(f"a {Y}[x](u){END} b")
+        self.put(2)
+        self.assertEqual(self.shown(), "a x b")
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.CHARS, 1)
+        self.assertEqual((self.text(), self.cursor()), ("a  b", 2))
+        self.editor(f"a [{Y}x{END}](u) b")
+        self.put(" b")  # the end of the link: its markup shows
+        self.assertEqual(self.shown(), "a [x](u) b")
+        self.put(0)
+        self.select(f" [{Y}x{END}](u) ")
+        self.view.emit("backspace")
+        self.assertEqual(self.text(), "ab")
+
+    def test_the_cursor_behind_a_link_in_a_mark_rests_behind_the_link(self):
+        self.editor(f"{Y}[x](u){END} b")
+        self.put(" b")
+        self.assertEqual(self.cursor(), self.text().index(END))
+        self.assertEqual(self.shown(), "[x](u) b")
+        self.assertTrue(self.view.type("!"))  # of the mark, not of the link
+        self.assertEqual(self.text(), f"{Y}[x](u)!{END} b")
+
+    def test_a_key_beside_a_link_takes_what_shows(self):
+        self.editor("a [one](u) b")
+        self.put(0)
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.CHARS, 1)
+        self.assertEqual(self.text(), " [one](u) b")
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.CHARS, 1)
+        self.assertEqual(self.text(), "[one](u) b")  # now before the link:
+        self.assertEqual(self.shown(), "[one](u) b")  # it shows
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.CHARS, 1)
+        self.assertEqual(self.text(), "one](u) b")
+        self.editor("a [one](u) b")
+        self.put("b")
+        self.view.emit("backspace")
+        self.assertEqual(self.shown(), "a [one](u)b")  # at its end: it shows
+        self.view.emit("backspace")
+        self.assertEqual(self.text(), "a [one](ub")
+
+    def test_a_word_in_a_link_is_deleted_as_it_shows(self):
+        self.editor("a [one](u)two b")
+        self.put(" b")
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.assertEqual(self.text(), "a  b")
+        self.assertEqual(self.plain.tried, [("a onetwo b", 8)])
+        self.editor("a [one](u)two b")
+        self.put("one")  # in the link, as it is written
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
+        self.assertEqual(self.view.defaults, ["delete-from-cursor"])
+
+    def test_what_is_copied_takes_whole_links_along(self):
+        self.editor("see [the page](u) now")
+        self.select("see [the page")
+        self.view.emit("copy-clipboard")
+        self.assertEqual(self.view.copied, "see [the page](u)")
+        at = self.buffer.get_iter_at_offset
+        self.buffer.select_range(at(5), at(len(self.text())))  # behind the bracket
+        self.view.emit("copy-clipboard")
+        self.assertEqual(self.view.copied, "[the page](u) now")
+        self.select("the")  # in the link, as it is written
+        self.view.emit("copy-clipboard")
+        self.assertEqual(self.view.copied, "the")
+        self.editor(f"a {Y}[x](u){END} b")
+        at = self.buffer.get_iter_at_offset
+        self.buffer.select_range(at(2), at(self.text().index("]")))
+        self.view.emit("copy-clipboard")
+        self.assertEqual(self.view.copied, f"{Y}[x](u){END}")
+
+    def test_a_pasted_link_arrives_whole_or_as_plain_text(self):
+        self.editor("see [the page](u) now\n")
+        text = self.text()
+        self.put(len(text))
+        self.view.paste(4, text.index(" now"))  # the link
+        self.assertEqual(self.text(), f"{text}[the page](u)")
+        self.view.type(" ")
+        self.assertEqual(self.shown(), "see the page now\nthe page ")
+        self.view.paste(0, text.index("page"))  # the beginning of one
+        self.assertEqual(self.text(), f"{text}[the page](u) see the ")
+        self.view.paste(text.index("page"), text.index("now"))  # the end of one
+        self.assertEqual(self.text(), f"{text}[the page](u) see the page ")
+        self.buffer.undo()  # one step
+        self.assertEqual(self.text(), f"{text}[the page](u) see the ")
+        self.assertEqual(self.marker.arrived, [])
+
+    def test_the_blue_of_links_follows_the_theme(self):
+        marker = self.editor(self.LINK)
+        light = marker.link.get_property("foreground-rgba").to_string()
+        self.style.turn(True)
+        dark = marker.link.get_property("foreground-rgba").to_string()
+        self.assertNotEqual(light, dark)
+        self.assertEqual(marker.link.get_priority(), 0)
+
+    def test_links_that_go_leave_nothing_behind(self):
+        marker = self.editor(self.LINK)
+        self.put(9)
+        self.buffer.set_text("plain")
+        spin(0.05)
+        self.assertEqual((marker.links, marker.open, marker.painted), ([], [], False))
+        self.put(2)  # nothing to follow
+        self.assertEqual(self.shown(), "plain")

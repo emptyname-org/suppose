@@ -232,6 +232,7 @@ class Place(NamedTuple):
 
 class BookPanes:
     def __init__(self, window):
+        fonts.bring()  # before anything is drawn
         self.window = window
         self.root = Gio.File.new_for_path(
             os.path.abspath(os.environ.get("BOOK_ROOT") or os.getcwd())

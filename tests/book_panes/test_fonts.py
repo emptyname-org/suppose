@@ -1,15 +1,21 @@
 """Fonts chosen in Preferences: what a setting names, its style sheet, the rows."""
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import gi
 
 gi.require_version("Pango", "1.0")
-from gi.repository import Pango
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import GLib, Pango, PangoCairo
 
 from book_panes import fonts
+
+from .test_channel import TMP
 
 
 def font(text):
@@ -88,8 +94,30 @@ class Widget:
         self.filter = shown
 
 
+class Context:
+    """Draws with the fonts of a machine that has few: one it lacks is
+    drawn with its monospace font where that is asked for, or with its
+    plain one."""
+
+    there = ("Fira Mono", "Serif", "DejaVu Sans Mono")
+
+    def load_font(self, description):
+        wanted = [name.strip() for name in description.get_family().split(",")]
+        family = next((name for name in wanted if name in self.there), None)
+        if family is None:
+            kind = any(name.lower() == "monospace" for name in wanted)
+            family = "DejaVu Sans Mono" if kind else "DejaVu Sans"
+        drawn = description.copy()
+        drawn.set_family(family)
+        return SimpleNamespace(describe=lambda: drawn)
+
+
 class FontButton(Widget):
     description = None
+    context = Context()
+
+    def get_pango_context(self):
+        return self.context
 
     def set_font_desc(self, description):
         self.description = description
@@ -273,6 +301,61 @@ class UseTest(Faked):
         self.assertFalse(fonts.is_monospace(SimpleNamespace(get_family=lambda: serif)))
 
 
+class FontMap:
+    """Takes font files in, but none that is named broken."""
+
+    def __init__(self):
+        self.added = []
+
+    def add_font_file(self, path):
+        if "broken" in path:
+            raise GLib.Error("no font")
+        self.added.append(path)
+
+
+class BringTest(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.object(fonts, "BROUGHT", set())
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_fira_mono_comes_with_the_application(self):
+        font_map = FontMap()
+        fonts.bring(font_map)
+        self.assertEqual(
+            [Path(path).name for path in font_map.added],
+            ["FiraMono-Bold.ttf", "FiraMono-Medium.ttf", "FiraMono-Regular.ttf"],
+        )
+        self.assertTrue((fonts.FACES / "OFL.txt").is_file())  # and its licence
+        fonts.bring(font_map)  # once
+        self.assertEqual(len(font_map.added), 3)
+
+    def test_the_files_are_fira_mono(self):
+        font_map = PangoCairo.FontMap.new()
+        if not hasattr(font_map, "add_font_file"):
+            self.skipTest("Pango before 1.56")
+        fonts.bring(font_map)
+        families = {family.get_name(): family for family in font_map.list_families()}
+        self.assertIn("Fira Mono", families)
+        self.assertTrue(fonts.is_monospace(families["Fira Mono"]))
+        drawn = fonts.named(font_map.create_context(), font("Fira Mono,monospace 12"))
+        self.assertEqual(drawn.to_string(), "Fira Mono 12")
+
+    def test_a_file_that_is_no_font_is_left_out(self):
+        os.makedirs(TMP, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TMP) as folder:
+            for name in ("a.ttf", "broken.ttf", "notes.txt"):
+                Path(folder, name).write_bytes(b"")
+            font_map = FontMap()
+            fonts.bring(font_map, Path(folder))
+            fonts.bring(font_map, Path(folder))  # the broken one is tried again
+            self.assertEqual([Path(path).name for path in font_map.added], ["a.ttf"])
+
+    def test_a_pango_that_takes_no_files_is_left_alone(self):
+        fonts.bring(object())
+        self.assertEqual(fonts.BROUGHT, set())
+
+
 class RowsTest(Faked):
     def rows(self, **values):
         self.settings = Settings(**values)
@@ -298,16 +381,38 @@ class RowsTest(Faked):
         self.assertFalse(hasattr(editor, "filter"))
         self.assertIs(agent.filter, fonts.is_monospace)
 
-    def test_nothing_chosen_shows_the_default_and_sets_nothing(self):
+    def test_nothing_chosen_shows_the_default_by_its_name_and_sets_nothing(self):
         rows = self.rows()
         row = rows[fonts.EDITOR_KEY]
-        self.assertEqual(row.button.description.to_string(), fonts.EDITOR_DEFAULT)
+        self.assertEqual(row.button.description.to_string(), "Fira Mono 12")
         self.assertFalse(row.reset.sensitive)
-        self.assertEqual(
-            rows[fonts.TERMINAL_KEY].button.description.to_string(), "Monospace 10"
+        self.assertEqual(  # no kind of fonts: the font drawn for it
+            rows[fonts.TERMINAL_KEY].button.description.to_string(),
+            "DejaVu Sans Mono 10",
         )
         self.assertEqual(self.settings.values[fonts.EDITOR_KEY], "")
         self.assertEqual(self.settings.values[fonts.TERMINAL_KEY], "")
+
+    def test_a_font_the_machine_lacks_shows_as_the_one_drawn_for_it(self):
+        with mock.patch.object(Context, "there", ("DejaVu Sans Mono",)):
+            rows = self.rows(**{fonts.TERMINAL_KEY: "Gone Mono Bold 13"})
+        self.assertEqual(
+            rows[fonts.EDITOR_KEY].button.description.to_string(),
+            "DejaVu Sans Mono 12",
+        )
+        self.assertEqual(
+            rows[fonts.TERMINAL_KEY].button.description.to_string(),
+            "DejaVu Sans Bold 13",
+        )
+        self.assertEqual(self.settings.values[fonts.TERMINAL_KEY], "Gone Mono Bold 13")
+        self.assertEqual(self.settings.values[fonts.EDITOR_KEY], "")
+
+    def test_a_machine_without_fonts_shows_what_is_asked_for(self):
+        with mock.patch.object(Context, "load_font", lambda _self, _wanted: None):
+            rows = self.rows()
+        self.assertEqual(
+            rows[fonts.EDITOR_KEY].button.description.to_string(), fonts.EDITOR_DEFAULT
+        )
 
     def test_a_chosen_font_is_shown(self):
         rows = self.rows(**{fonts.TERMINAL_KEY: "DejaVu Sans Mono 15"})
@@ -333,7 +438,7 @@ class RowsTest(Faked):
         row = rows[fonts.EDITOR_KEY]
         row.reset.emit("clicked")
         self.assertEqual(self.settings.values[fonts.EDITOR_KEY], "")
-        self.assertEqual(row.button.description.to_string(), fonts.EDITOR_DEFAULT)
+        self.assertEqual(row.button.description.to_string(), "Fira Mono 12")
         self.assertFalse(row.reset.sensitive)
 
     def test_a_change_from_elsewhere_is_shown(self):

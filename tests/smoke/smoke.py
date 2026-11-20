@@ -596,6 +596,101 @@ def scenario(app):
         and view.get_text() == edited,
     )
 
+    # what undo puts back is completed by nobody: no line begun anew
+    buffer.place_cursor(buffer.get_end_iter())
+    typing(" xuno\nxdue")
+    lines = view.get_text()
+    select("xuno")
+    window.activate_action("book." + marks.ACTION, GLib.Variant("s", "green"))
+    two_lines = view.get_text()
+    put("xdue")
+    view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+    joined = shown()
+    buffer.undo()
+    yield 400  # Apostrophe begins lines in its own time
+    check(
+        "hidden: a word and its line, deleted and put back, are as they were",
+        joined == typed.replace(".", "!") + " xdue"
+        and view.get_text() == two_lines
+        and shown() == typed.replace(".", "!") + " xuno\nxdue",
+    )
+    put("xdue")
+    view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
+    check(
+        "hidden: a word beside no tag is deleted as in a text without marks",
+        view.get_text() == two_lines.replace("xdue", ""),
+    )
+    for _step in range(20):
+        if view.get_text() == lines:
+            break
+        buffer.undo()
+    buffer.undo()
+
+    # the markup of a link is hidden, its words are blue; the cursor in it shows it
+    link = "[the page](https://example.org/p)"
+    buffer.place_cursor(buffer.get_end_iter())
+    typing(" see ")
+    for key in link:  # Apostrophe closes brackets as they are typed
+        typing(key)
+    written = view.get_text() == edited + " see " + link and shown().endswith(link)
+    typing(" ok")
+    check(
+        "links: one that is typed shows as written until the cursor leaves it",
+        written
+        and view.get_text() == edited + " see " + link + " ok"
+        and shown().endswith(" see the page ok")
+        and painted("the page") == ["book-link"]
+        and "book-mark-tag" in painted("[the page")
+        and "book-mark-tag" in painted("](https"),
+    )
+    put("page](")
+    inside = shown().endswith(" see " + link + " ok")
+    put("ok")
+    outside = shown().endswith(" see the page ok")
+    put(" ok")
+    check(
+        "links: the cursor in a link, or at an end of it, shows it as written",
+        inside and outside and shown().endswith(" see " + link + " ok"),
+    )
+    typing(",")
+    put("see")
+    check(
+        "links: what is typed at the end of a link is outside it",
+        view.get_text().endswith(link + ", ok") and shown().endswith("the page, ok"),
+    )
+    select("e " + link + ", o")
+    across = shown().endswith(" see the page, ok")
+    view.emit("copy-clipboard")
+    buffer.place_cursor(buffer.get_end_iter())
+    view.emit("paste-clipboard")
+    yield 600
+    check(
+        "links: a link copied in the editor is pasted whole",
+        across
+        and view.get_text().endswith(", oke " + link + ", o")
+        and shown().endswith(", oke the page, o"),
+    )
+    buffer.undo()
+    select("e " + link + ", o")
+    view.emit("backspace")
+    check(
+        "links: a link goes with the last of its words",
+        view.get_text() == edited + " sek",
+    )
+    buffer.undo()
+    buffer.place_cursor(buffer.get_end_iter())
+    typing(" xa[b](u)c tre")
+    put(" tre")
+    view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+    check(
+        "links: a word a link is part of is deleted as the one word it shows",
+        view.get_text().endswith(", ok  tre"),
+    )
+    for _step in range(80):
+        if view.get_text() == edited:
+            break
+        buffer.undo()
+
     put("chapter!")
     window.activate_action("book." + marks.CLEAR, None)
     select("!")
@@ -725,6 +820,28 @@ def scenario(app):
         and not dialog.bigger_text_row.get_visible()
         and not any(row.reset.get_sensitive() for row in rows.values())
         and own[0][2] != [],
+    )
+
+    def labels(widget):
+        found = []
+        child = widget.get_first_child()
+        while child is not None:
+            if isinstance(child, Gtk.Label):
+                found.append(child.get_text())
+            found += labels(child)
+            child = child.get_next_sibling()
+        return found
+
+    context = view.get_pango_context()
+    drawn = context.load_font(context.get_font_description()).describe()
+    named = {key: labels(row.button) for key, row in rows.items()}
+    check(
+        "fonts: Fira Mono comes with the application: the editor's, named, to choose",
+        drawn.get_family() == "Fira Mono"
+        and "Fira Mono"
+        in {family.get_name() for family in dialog.get_pango_context().list_families()}
+        and named[fonts.EDITOR_KEY][0].startswith("Fira Mono")
+        and all(names and "None" not in names[0] for names in named.values()),
     )
     rows[fonts.EDITOR_KEY].button.set_font_desc(
         Pango.FontDescription.from_string("Serif 20")

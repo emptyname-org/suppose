@@ -18,12 +18,14 @@ agent's terminal on the right.
   selected it recolours or removes the mark at the cursor. A mark is in the
   file as `<mark class="yellow">…</mark>`, one to a line, none in code; the
   editor hides the tags, the preview shows the colours, and the tags are not
-  counted as words. With "Auto-Hide Header Bar" the editor's bars hide while
+  counted as words. A link, `[words](address)` in one line, shows its words
+  in blue; the rest shows while the cursor is in the link or at an end of
+  it. With "Auto-Hide Header Bar" the editor's bars hide while
   typing, to the agent too; the pointer at the top, a menu or the search
   shows them, going to the tree or the agent does not.
 - **Preferences**: font and size of the editor and of the agent's terminal,
-  each with a button for the default (Fira Mono fitted to the width; the
-  system's monospace font).
+  each with a button for the default (Fira Mono, which comes with the
+  application, fitted to the width; the system's monospace font).
 - **Agent**: a terminal running Claude Code or Codex, chosen in the pane's
   header, in the working folder. Shift+Enter breaks a line, Ctrl+Shift+C and
   Ctrl+Shift+V copy and paste.
@@ -113,4 +115,6 @@ The engines read their own variables as usual (`CLAUDE_CONFIG_DIR`,
 The project's own files are under CC0 1.0 (`LICENSE`).
 `patches/apostrophe-3.2-book.patch` changes Apostrophe and is under
 Apostrophe's licence, the GNU GPL version 3 (`patches/COPYING`), as is a build
-that contains Apostrophe.
+that contains Apostrophe. Fira Mono (`src/book_panes/fira/`, from
+https://github.com/mozilla/Fira, tag 4.202) is under the SIL Open Font
+License 1.1 (`src/book_panes/fira/OFL.txt`).

@@ -20,6 +20,9 @@ A hidden tag takes no place and is not typed into or deleted by hand.
 Keys delete the text beside it; a mark whose text goes, goes with it; a
 line broken within a mark breaks the mark; what is copied takes whole
 marks along, and a tag pasted without its partner goes.
+
+The markup of links is hidden with the tags, and by the same rules, while
+the cursor is not in the link (links.py).
 """
 
 import bisect
@@ -33,6 +36,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
+
+from . import links
 
 # name -> background in the editor on a light theme, on a dark one
 COLORS = {
@@ -235,16 +240,23 @@ def joined(ranges):
     return whole
 
 
-def plan(text):
-    """What the editor shows of a text's marks, as ranges in order: for
-    "hide" the tags, for "dim" the tags of marks without text, for each
-    colour the text in it (the innermost mark's)."""
+def plan(text, cursor=None, literal=None, linked=None):
+    """What the editor shows of a text's marks and links, as ranges in
+    order: for "hide" the tags and the markup of links, for "dim" the
+    tags of marks without text, for each colour the text in it (the
+    innermost mark's), for "link" the words of links. A link the cursor,
+    from its one end to its other, is in keeps its markup. literal,
+    linked: the text's code and links, where they are known."""
+    if literal is None:
+        literal = code(text)
+    if linked is None:
+        linked = links.found(text, literal)
     shown: dict[str, list[tuple[int, int]]] = {
-        name: [] for name in ("hide", "dim", *COLORS)
+        name: [] for name in ("hide", "dim", "link", *COLORS)
     }
     opened: list[list] = []  # of each mark around: its tag, its colour, text seen in it
     place = 0
-    for start, end, color in tags_of(spans(text)):
+    for start, end, color in tags_of(spans(text, literal)):
         if opened and start > place:
             shown[opened[-1][1]].append((place, start))
             opened[-1][2] = True
@@ -256,6 +268,11 @@ def plan(text):
             if opened and full:
                 opened[-1][2] = True
         place = end
+    written = links.around(linked, *cursor) if cursor is not None else []
+    for link in linked:
+        shown["link"].append((link.start + 1, link.inner_end))
+        if link not in written:
+            shown["hide"] += [(link.start, link.start + 1), (link.inner_end, link.end)]
     return {name: joined(sorted(ranges)) for name, ranges in shown.items()}
 
 
@@ -499,6 +516,31 @@ def tidy(text, place):
     )
 
 
+def hidden_pieces(text):
+    """What a hidden stretch is made of, in order: where each piece
+    begins and ends, whether it is of a mark or of a link, whether it
+    opens one. What is no whole tag and no markup of a link: of None."""
+    found: list[tuple[int, int, str | None, bool]] = []
+    place = 0
+    while place < len(text):
+        tag = TAG.match(text, place)
+        if tag is not None:
+            found.append((place, tag.end(), "mark", bool(tag.group(1))))
+            place = tag.end()
+            continue
+        piece = links.piece(text, place)
+        if piece is not None:
+            found.append((place, place + piece[0], "link", piece[1]))
+            place += piece[0]
+        elif found and found[-1][2] is None:
+            found[-1] = (found[-1][0], place + 1, None, False)
+            place += 1
+        else:
+            found.append((place, place + 1, None, False))
+            place += 1
+    return found
+
+
 WORD_LINES = 2  # around the cursor: where a word to delete is looked for first
 
 
@@ -570,10 +612,20 @@ class Marker:
         self.lines = 0  # ... and the lines of the text when it began
         self.arrived: list[tuple] = []  # hidden tags that came with pasted text
         self.back = None  # where the cursor returns after a Delete past a tag
+        self.pasting = False  # what Apostrophe's buffer told before a replay
+        self.links: list[links.Link] = []  # of the text as it was painted
+        self.open: list[links.Link] = []  # ... those that show their markup
         self.hide = buffer.create_tag("book-mark-tag", invisible=True, editable=False)
         self.dim = buffer.create_tag("book-mark-empty", foreground="gray")
+        self.link = buffer.create_tag("book-link")
+        self.link.set_priority(0)  # under what Apostrophe greys out
         self.tags = {name: buffer.create_tag("book-mark-" + name) for name in COLORS}
-        self.shown = {"hide": self.hide, "dim": self.dim, **self.tags}
+        self.shown = {
+            "hide": self.hide,
+            "dim": self.dim,
+            "link": self.link,
+            **self.tags,
+        }
         self.style = style or Adw.StyleManager.get_default()
         self.handlers = [
             (self.style, self.style.connect("notify::dark", self._on_theme)),
@@ -700,9 +752,15 @@ class Marker:
         self._forget_arrived()
         self._paint_if_stale()
 
-    def _on_replay(self, _buffer, begins):
+    def _on_replay(self, buffer, begins):
+        """Undo and redo put text back as it was: Apostrophe completes
+        nothing in it, no more than in what is pasted."""
         self.replaying = begins
-        if not begins:
+        if begins:
+            self.pasting = getattr(buffer, "paste_ongoing", False)
+            buffer.paste_ongoing = True
+        else:
+            buffer.paste_ongoing = self.pasting
             self._paint_if_stale()
 
     def _on_tagged(self, buffer, tag, start, end):
@@ -722,35 +780,32 @@ class Marker:
         self.arrived = []
 
     def _strays(self):
-        """Of the hidden tags that came with pasted text: those without
-        their partner, and what is no whole tag; last first."""
+        """Of the hidden tags and markup that came with pasted text: what
+        came without its partner, and what is no whole piece; last first."""
         buffer = self.buffer
-        # (start, end, whether an opening tag; None: no whole tag)
-        pieces: list[tuple[int, int, bool | None]] = []
+        pieces = []
         for first, last in self.arrived:
             start = buffer.get_iter_at_mark(first)
-            base, seen = start.get_offset(), 0
+            base = start.get_offset()
             came = buffer.get_slice(start, buffer.get_iter_at_mark(last), True)
-            for tag in TAG.finditer(came):
-                if tag.start() > seen:
-                    pieces.append((base + seen, base + tag.start(), None))
-                pieces.append(
-                    (base + tag.start(), base + tag.end(), bool(tag.group(1)))
-                )
-                seen = tag.end()
-            if len(came) > seen:
-                pieces.append((base + seen, base + len(came), None))
-        strays, opened = [], []  # type: list, list
+            pieces += [
+                (base + begins, base + ends, kind, opens)
+                for begins, ends, kind, opens in hidden_pieces(came)
+            ]
+        strays = []
+        opened: dict[str, list] = {"mark": [], "link": []}
         for piece in sorted(pieces, key=lambda piece: piece[:2]):
-            if piece[2] is None:
+            _start, _end, kind, opens = piece
+            if kind is None:
                 strays.append(piece)
-            elif piece[2]:
-                opened.append(piece)
-            elif opened:
-                opened.pop()
+            elif opens:
+                opened[kind].append(piece)
+            elif opened[kind]:
+                opened[kind].pop()
             else:
                 strays.append(piece)
-        return sorted(strays + opened, reverse=True)
+        strays += opened["mark"] + opened["link"]
+        return sorted((piece[:2] for piece in strays), reverse=True)
 
     def _settle(self):
         """After the writer changed the text: tags that came without
@@ -761,7 +816,7 @@ class Marker:
         strays = self._strays()
         self._forget_arrived()
         with self._own():
-            for start, end, _kind in strays:
+            for start, end in strays:
                 buffer.delete(at(start), at(end))
         if buffer.get_line_count() > self.lines and not buffer.get_has_selection():
             change = tidy(self._text(), buffer.get_property("cursor-position"))
@@ -770,7 +825,7 @@ class Marker:
 
     def _on_deleted(self, buffer, start, end):
         """A mark whose text was deleted goes with it, at once: nothing
-        can be typed between two hidden tags."""
+        can be typed between two hidden tags. So does a link."""
         if not self.acting or not self._by_hand():
             return
         before = start.copy()
@@ -781,12 +836,12 @@ class Marker:
         ):
             return
         while True:
-            low = self._opening_before(start, 1)
-            high = self._closing_after(start, 1)
-            if low.equal(start) or high.equal(start):
+            opened, closed = self._opening(start), self._closing(start)
+            if opened is None or closed is None or opened[1] != closed[1]:
                 break
+            low = opened[0]
             with self._own():
-                buffer.delete(low, high)
+                buffer.delete(low, closed[0])
             for bound in (start, end):  # GTK goes on from them
                 bound.assign(low)
         # still between tags, of two marks: the cursor rests before them
@@ -795,12 +850,14 @@ class Marker:
             self._steer(self._hidden_before(cursor))
 
     def _on_mark_set(self, buffer, _place, mark):
-        """The cursor rests before hidden tags, wherever it is put: what
-        is typed at the end of a mark belongs to it, at its beginning
-        not."""
-        if self.steering or mark.get_name() != "insert" or buffer.get_has_selection():
+        """The cursor rests before the hidden tags of marks, wherever it
+        is put: what is typed at the end of a mark belongs to it, at its
+        beginning not. A link it comes into shows its markup."""
+        if self.steering or mark.get_name() not in ("insert", "selection_bound"):
             return
-        self._steer(self._hidden_before(buffer.get_iter_at_mark(mark)))
+        if mark.get_name() == "insert" and not buffer.get_has_selection():
+            self._steer(self._hidden_before(buffer.get_iter_at_mark(mark)))
+        self._follow()
 
     def _steer(self, place, bound=None):
         """Put the cursor to the place, to stay; nowhere with None."""
@@ -812,48 +869,81 @@ class Marker:
         finally:
             self.steering = False
 
-    def _opening_before(self, place, most=-1):
-        """Where the hidden opening tags right before the place begin; no
-        more of them than most."""
+    def _bounds(self):
+        """The two ends of the cursor, the lower first."""
         buffer = self.buffer
-        at = buffer.get_iter_at_offset
-        while most:
-            before = place.copy()
-            if not before.backward_char() or not before.has_tag(self.hide):
-                break
-            offset = place.get_offset()
-            opened = OPENING_END.search(
-                buffer.get_slice(at(max(0, offset - LONGEST)), place, True)
+        return tuple(
+            sorted(
+                buffer.get_iter_at_mark(mark).get_offset()
+                for mark in (buffer.get_insert(), buffer.get_selection_bound())
             )
-            if opened is None:
-                break
-            place = at(offset - len(opened.group()))
-            most -= 1
-        return place
+        )
 
-    def _closing_after(self, place, most=-1):
-        """Where the hidden closing tags right at the place end; no more
-        of them than most."""
-        buffer = self.buffer
-        while most and place.has_tag(self.hide):
-            after = buffer.get_iter_at_offset(place.get_offset() + len(CLOSING))
-            if buffer.get_slice(place, after, True) != CLOSING:
-                break
-            place = after
-            most -= 1
-        return place
+    def _follow(self):
+        """The cursor moved: the link it is in now shows its markup, the
+        one it left hides it. A text that changed is painted anyway."""
+        if self.stale or self.painting or not self.links:
+            return
+        if links.around(self.links, *self._bounds()) != self.open:
+            self._paint()
 
-    def _hidden_before(self, place):
-        """Where the hidden tags right before the place begin, or None."""
+    def _opening(self, place):
+        """What opens a mark or a link, hidden right before the place:
+        where it begins and of which it is ("mark", "link"); or None."""
         before = place.copy()
         if not before.backward_char() or not before.has_tag(self.hide):
             return None
-        if not before.starts_tag(self.hide):
-            before.backward_to_tag_toggle(self.hide)
-        return before
+        if before.get_char() == links.OPENING:
+            return before, "link"
+        at = self.buffer.get_iter_at_offset
+        offset = place.get_offset()
+        opened = OPENING_END.search(
+            self.buffer.get_slice(at(max(0, offset - LONGEST)), place, True)
+        )
+        if opened is None:
+            return None
+        return at(offset - len(opened.group())), "mark"
+
+    def _closing(self, place):
+        """What closes a mark or a link, hidden right at the place: where
+        it ends and of which it is; or None."""
+        if not place.has_tag(self.hide):
+            return None
+        end = place.copy()
+        end.forward_to_tag_toggle(self.hide)
+        text = self.buffer.get_slice(place, end, True)
+        if text.startswith(CLOSING):
+            length, kind = len(CLOSING), "mark"
+        else:
+            piece = links.piece(text)
+            if piece is None or piece[1]:
+                return None
+            length, kind = piece[0], "link"
+        return self.buffer.get_iter_at_offset(place.get_offset() + length), kind
+
+    def _hidden_before(self, place):
+        """Where the hidden tags of marks right before the place begin, or
+        None. No markup of a link is among them: the cursor behind it
+        shows it."""
+        at = self.buffer.get_iter_at_offset
+        start = place
+        while True:
+            before = start.copy()
+            if not before.backward_char() or not before.has_tag(self.hide):
+                break
+            offset = start.get_offset()
+            text = self.buffer.get_slice(at(max(0, offset - LONGEST)), start, True)
+            opened = OPENING_END.search(text)
+            if text.endswith(CLOSING):
+                start = at(offset - len(CLOSING))
+            elif opened is not None:
+                start = at(offset - len(opened.group()))
+            else:
+                break
+        return None if start.equal(place) else start
 
     def _hidden_after(self, place):
-        """Where the hidden tags right at the place end, or None."""
+        """Where what is hidden right at the place ends, or None."""
         if not place.has_tag(self.hide):
             return None
         after = place.copy()
@@ -893,8 +983,8 @@ class Marker:
 
     def _delete_words(self, count):
         """Delete the words an editor without marks deletes from the text
-        as it shows: a hidden tag ends no word. False where no hidden tag
-        is in the way; the editor deletes there itself."""
+        as it shows: what is hidden ends no word and begins none. False
+        where the text hides nothing; the editor deletes there itself."""
         buffer = self.buffer
         hidden = self._ranges(self.hide)
         if not hidden:
@@ -905,24 +995,24 @@ class Marker:
             buffer.get_iter_at_line(max(0, line - WORD_LINES))[1].get_offset(),
             buffer.get_iter_at_line(line + WORD_LINES + 1)[1].get_offset(),
         )
-        for low, high in (near, (0, size)):
+        whole = (0, size)
+        for low, high in dict.fromkeys((near, whole) if abs(count) == 1 else (whole,)):
             shown = Shown(buffer, hidden, low, high)
             first, last = self._plain_words(
                 shown.text, shown.offset(cursor.get_offset()), count
             )
-            # words that reach the edge may go on beyond it: look at it all
-            if (first > 0 or low == 0) and (last < len(shown.text) or high == size):
+            # One word found among these lines is the word of the whole
+            # text. None found here may be further on.
+            if shown.text[first:last].strip():
                 break
-        start, end = shown.place(first), shown.place(last)
-        if first == last or not any(
-            begins <= end and ends >= start for begins, ends in hidden
-        ):
-            return False
-        at = buffer.get_iter_at_offset
-        buffer.begin_user_action()
-        buffer.delete_interactive(at(start), at(end), self.view.get_editable())
-        buffer.end_user_action()
-        self.view.scroll_mark_onscreen(buffer.get_insert())
+        if first < last:
+            at = buffer.get_iter_at_offset
+            buffer.begin_user_action()
+            buffer.delete_interactive(
+                at(shown.place(first)), at(shown.place(last)), self.view.get_editable()
+            )
+            buffer.end_user_action()
+            self.view.scroll_mark_onscreen(buffer.get_insert())
         return True
 
     def _plain_words(self, text, cursor, count):
@@ -941,6 +1031,7 @@ class Marker:
         if self.back is not None:
             self._steer(self.buffer.get_iter_at_mark(self.back))
             self._forget_back()
+            self._follow()
 
     def _forget_back(self):
         if self.back is not None:
@@ -949,14 +1040,17 @@ class Marker:
 
     def _on_copy(self, _view):
         """What is copied or cut takes along the hidden tags of the marks
-        it begins or ends with, so a mark selected as it shows is copied
-        whole."""
+        it begins or ends with, and the markup of such links, so a mark
+        selected as it shows is copied whole."""
         buffer = self.buffer
         if not buffer.get_has_selection():
             return
         start, end = buffer.get_selection_bounds()
-        low = self._opening_before(start)
-        high = self._closing_after(end)
+        low, high = start, end
+        while (opened := self._opening(low)) is not None:
+            low = opened[0]
+        while (closed := self._closing(high)) is not None:
+            high = closed[0]
         if low.equal(start) and high.equal(end):
             return
         if buffer.get_iter_at_mark(buffer.get_insert()).equal(start):
@@ -972,6 +1066,9 @@ class Marker:
             color = Gdk.RGBA()
             color.parse(COLORS[name][1 if dark else 0])
             tag.set_property("background-rgba", color)
+        color = Gdk.RGBA()
+        color.parse(links.COLORS[1 if dark else 0])
+        self.link.set_property("foreground-rgba", color)
 
     def _on_changed(self, *_args):
         self.stale = True
@@ -1004,17 +1101,23 @@ class Marker:
             on, start = not on, here
 
     def _paint(self):
-        """Give the text the tags its marks ask for; only where they
-        differ from what it carries, so the view lays out no more anew."""
+        """Give the text the tags its marks and links ask for; only where
+        they differ from what it carries, so the view lays out no more
+        anew."""
         buffer = self.buffer
         self.stale = False
         if self.timer:
             GLib.source_remove(self.timer)
             self.timer = 0
         text = self._text()
-        if not self.painted and CLOSING not in text:
+        if not self.painted and CLOSING not in text and "](" not in text:
+            self.links = self.open = []
             return
-        wanted = plan(text)
+        literal = code(text)
+        bounds = self._bounds()
+        self.links = links.found(text, literal)
+        self.open = links.around(self.links, *bounds)
+        wanted = plan(text, bounds, literal, self.links)
         at = buffer.get_iter_at_offset
         self.painting = True
         try:

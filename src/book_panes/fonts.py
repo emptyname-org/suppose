@@ -3,23 +3,62 @@
 Each is a settings key holding a font as Pango describes one ("Fira Sans
 13"). Empty means the default: Apostrophe's Fira Mono in a size it fits to
 the width, the system's monospace font in the terminal.
+
+Fira Mono comes with the application (fira/, with its licence): Debian
+has no package of it. It is a font of this process alone, to draw the
+text with and to choose.
 """
+
+from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
+gi.require_version("PangoCairo", "1.0")
 
-from gi.repository import Adw, Gtk, Pango
+from gi.repository import Adw, GLib, Gtk, Pango, PangoCairo
 
 EDITOR_KEY = "editor-font"
 TERMINAL_KEY = "terminal-font"
 EDITOR_SELECTOR = "textview.apostrophe-editor"
-EDITOR_DEFAULT = "Fira Mono 12"  # shown while none is chosen
+# shown while none is chosen; as Apostrophe's style sheet names it
+EDITOR_DEFAULT = "Fira Mono,monospace 12"
 SMALLEST = 6
 LARGEST = 72
+FACES = Path(__file__).with_name("fira")
 
 PROVIDERS: dict = {}  # display: the provider of the editor's font
+BROUGHT: set = set()  # the font files this process has taken in
+
+
+def bring(font_map=None, faces=FACES):
+    """Take the fonts that come with the application into the fonts of
+    this process; each once. A Pango that cannot (before 1.56) and a file
+    that is no font leave the machine's fonts."""
+    font_map = font_map or PangoCairo.FontMap.get_default()
+    add = getattr(font_map, "add_font_file", None)
+    if add is None:
+        return
+    for face in sorted(faces.glob("*.ttf")):
+        if str(face) not in BROUGHT:
+            try:
+                add(str(face))
+            except GLib.Error:
+                continue
+            BROUGHT.add(str(face))
+
+
+def named(context, description):
+    """The description under the name of the font that is drawn for it:
+    a font the machine lacks, and a kind of fonts ("Monospace"), stand for
+    another, and a chooser's button names only fonts there are."""
+    font = context.load_font(description)
+    if font is None:
+        return description
+    named_one = description.copy()
+    named_one.set_family(font.describe().get_family())
+    return named_one
 
 
 def described(text):
@@ -128,7 +167,10 @@ class FontRow:
 
     def _show(self, *_args):
         chosen = described(self.settings.get_string(self.key))
-        description = chosen or Pango.FontDescription.from_string(self.default)
+        description = named(
+            self.button.get_pango_context(),
+            chosen or Pango.FontDescription.from_string(self.default),
+        )
         self.shown = description.to_string()  # before the button tells of it
         self.button.set_font_desc(description)
         self.reset.set_sensitive(chosen is not None)
