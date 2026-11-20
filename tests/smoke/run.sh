@@ -20,7 +20,21 @@ echo "engine=$BOOK_ENGINE args=$*"
 exec cat
 END
 chmod +x "$scratch/engine"
-exec env -u WAYLAND_DISPLAY -u BOOK_ENGINE -u PYTHONPATH -u LD_LIBRARY_PATH -u GI_TYPELIB_PATH \
+# What a run leaves behind is ended: its bus starts the desktop's portal,
+# which does not go with the bus.
+sweep() {
+    for environment in /proc/[0-9]*/environ; do
+        if grep -qsFxz "SMOKE_SCRATCH=$scratch" "$environment"; then
+            pid=${environment#/proc/}
+            kill "${pid%/environ}" 2>/dev/null || :
+        fi
+    done
+}
+trap sweep EXIT
+trap 'exit 143' HUP INT TERM
+# The hidden display first and the bus in it: what the bus starts is given
+# that display, never the desktop's.
+env -u DISPLAY -u WAYLAND_DISPLAY -u BOOK_ENGINE -u PYTHONPATH -u LD_LIBRARY_PATH -u GI_TYPELIB_PATH \
     -u GSETTINGS_SCHEMA_DIR -u XDG_DATA_DIRS -u SUPPOSE_SOCKET \
     GDK_BACKEND=x11 GSK_RENDERER=cairo GSETTINGS_BACKEND=memory \
     HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/home/.config" \
@@ -32,6 +46,6 @@ exec env -u WAYLAND_DISPLAY -u BOOK_ENGINE -u PYTHONPATH -u LD_LIBRARY_PATH -u G
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$scratch/runtime}" \
     SMOKE_SCRATCH="$scratch" BOOK_ROOT="$scratch/book" BOOK_AGENT_CMD="$agent" \
     SUPPOSE_MAIN="$root/tests/smoke/smoke.py" \
-    dbus-run-session -- \
     xvfb-run -a -s "-screen 0 1680x1000x24" \
+    dbus-run-session -- \
     "$app/bin/suppose"
