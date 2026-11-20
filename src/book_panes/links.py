@@ -5,6 +5,11 @@ as it hides the tags of marks). The cursor in a link, or at an end of it,
 shows the link as it is written, to change it. So are shown and hidden
 links written in one line, with their destination in parentheses; other
 links and images stay as written. Code holds no links.
+
+A line is read once, from its beginning: brackets pair as they nest, a
+backslash makes the next character a plain one, brackets in code are
+none. A pair with a destination behind it is a link, and then nothing
+around it is one.
 """
 
 import bisect
@@ -13,19 +18,19 @@ from typing import NamedTuple
 
 # light theme, dark theme
 COLORS = ("#1a5fb4", "#78aeed")
-# the words: one line; a pair of brackets within, unless a link of its own
-WORDS = r"(?:[^\[\]\n\\]|\\.|\[[^\[\]\n]*\](?!\())+"
-# Behind the words: the destination, in <> or without blanks, and a title.
-# No two parts can take the same blanks, so a tail that never closes is
-# given up in one pass.
+# what a line is read by: a character made plain, a bracket (of an image)
+SIGN = re.compile(r"\\.|!?\[|\]")
+# Behind the words: the destination, in <> or without blanks, and a title;
+# or a title alone. No two parts can take the same blanks more than once,
+# so a tail that never closes is given up in one pass.
 PART = r"(?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))"
 TITLE = r"(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'|\((?:[^()\\\n]|\\.)*\))"
 TAIL = re.compile(
-    r"\]\([ \t]*"
-    r"(?:(?:<[^<>\n]*>|" + PART + r"+)(?:[ \t]+(?:" + TITLE + r"[ \t]*)?)?)?"
-    r"\)"
+    r"\]\((?:"
+    r"[ \t]*(?:(?:<[^<>\n]*>|" + PART + r"+)(?:[ \t]+(?:" + TITLE + r"[ \t]*)?)?)?"
+    r"|[ \t]+" + TITLE + r"[ \t]*"
+    r")\)"
 )
-LINK = re.compile(r"\[(?P<words>" + WORDS + ")" + TAIL.pattern)
 OPENING = "["
 
 
@@ -38,35 +43,52 @@ class Link(NamedTuple):
     end: int
 
 
-def plain(text, place):
-    """Whether a backslash makes the character at the place a plain one."""
-    slashes = 0
-    while place > slashes and text[place - slashes - 1] == "\\":
-        slashes += 1
-    return slashes % 2 == 1
-
-
 def in_code(literal, starts, place):
     index = bisect.bisect_right(starts, place) - 1
     return index >= 0 and place < literal[index][1]
 
 
+def read_line(text, begin, end, literal, starts, links):
+    """Add the links of the line from begin to end."""
+    opened: list[tuple[int, bool]] = []  # brackets open: where, of an image
+    place = begin
+    while True:
+        sign = SIGN.search(text, place, end)
+        if sign is None:
+            return
+        place = sign.end()
+        if sign.group()[0] == "\\" or in_code(literal, starts, place - 1):
+            continue
+        if sign.group() != "]":
+            opened.append((place - 1, len(sign.group()) == 2))
+            continue
+        if not opened:
+            continue
+        start, image = opened.pop()
+        tail = TAIL.match(text, place - 1, end)
+        if tail is None:
+            continue
+        if not image:
+            if not text[start + 1 : place - 1].strip():
+                continue  # nothing to show
+            links.append(Link(start, place - 1, tail.end()))
+        opened.clear()
+        place = tail.end()
+
+
 def found(text, literal=()):
     """The links of a text, in order. literal: its stretches of code, in
     order, each beginning with where it starts and ends."""
-    if "](" not in text:
-        return []
+    links: list[Link] = []
     starts = [piece[0] for piece in literal]
-    links = []
-    for match in LINK.finditer(text):
-        start, inner_end = match.start(), match.end("words")
-        if plain(text, start) or not match.group("words").strip():
-            continue
-        if start and text[start - 1] == "!" and not plain(text, start - 1):
-            continue  # an image
-        if in_code(literal, starts, start) or in_code(literal, starts, inner_end):
-            continue
-        links.append(Link(start, inner_end, match.end()))
+    place = text.find("](")
+    while place >= 0:
+        begin = text.rfind("\n", 0, place) + 1
+        end = text.find("\n", place)
+        if end < 0:
+            end = len(text)
+        read_line(text, begin, end, literal, starts, links)
+        place = text.find("](", end)
     return links
 
 

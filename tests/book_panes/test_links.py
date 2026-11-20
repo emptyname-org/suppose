@@ -33,6 +33,9 @@ class FoundTest(unittest.TestCase):
             "](a\\)b)",
             "]()",
             "]( u )",
+            ']( "a b")',
+            "]( 'a b')",
+            "]( (a b))",
         ):
             with self.subTest(tail=tail):
                 self.assertEqual(found(f"[w{tail} x"), [("w", tail)])
@@ -46,6 +49,18 @@ class FoundTest(unittest.TestCase):
     def test_a_link_within_brackets_is_the_link(self):
         self.assertEqual(found("[a [b](u) c](v)"), [("b", "](u)")])
         self.assertEqual(found("[[b](u)]"), [("b", "](u)")])
+
+    def test_brackets_pair_as_they_nest(self):
+        self.assertEqual(found("[a [b [c] d] e](u)"), [("a [b [c] d] e", "](u)")])
+        self.assertEqual(found("[a [b](x y) c](v)"), [("a [b](x y) c", "](v)")])
+        self.assertEqual(found("[a ![b] c](u)"), [("a ![b] c", "](u)")])
+        self.assertEqual(found("a] [b](u)"), [("b", "](u)")])
+        self.assertEqual(found("[a [b](u)"), [("b", "](u)")])
+
+    def test_a_backslash_makes_a_bracket_a_plain_one_wherever_it_stands(self):
+        self.assertEqual(found("[a [b\\] c](u)"), [("b\\] c", "](u)")])
+        self.assertEqual(found("\\[a]([c](d))"), [("c", "](d)")])
+        self.assertEqual(found("[a\\](u) [b](v)"), [("b", "](v)")])
 
     def test_what_is_no_link_in_one_line_stays_as_written(self):
         for text in (
@@ -76,6 +91,8 @@ class FoundTest(unittest.TestCase):
         self.assertEqual(found("```\n[a](u)\n```\n[b](v)"), [("b", "](v)")])
         self.assertEqual(found("[a `](u)` b"), [])
         self.assertEqual(found("[`a`](u)"), [("`a`", "](u)")])
+        self.assertEqual(found("[a `]` b](u)"), [("a `]` b", "](u)")])
+        self.assertEqual(found("`[` a](u)"), [])
 
     def test_long_texts_are_read_in_one_pass(self):
         text = "word [a](u) [ and ( " * 20000
@@ -92,9 +109,15 @@ class FoundTest(unittest.TestCase):
             "[x](" + "(a" * 50000,
             "[x]( " * 50000,
             "[" + "[a] " * 50000,
+            "\\[" * 50000 + "](",
+            "[\\]" * 50000 + "](",
+            "[" * 50000 + "](",
+            "[" * 50000 + '](u "a ' * 50000,
         ):
             self.assertEqual(links.found(text), [])
         self.assertIsNone(links.piece("](" + " " * 50000))
+        deep = "[" * 50000 + "a" + "]" * 50000 + "(u)"
+        self.assertEqual(links.found(deep), [links.Link(0, 100000, 100004)])
         self.assertLess(time.process_time() - started, 2)
 
     def test_blanks_belong_to_one_part_of_the_tail(self):
@@ -139,6 +162,7 @@ class PieceTest(unittest.TestCase):
         self.assertEqual(links.piece("[<mark>"), (1, True))
         self.assertEqual(links.piece("](u (t))</mark>"), (8, False))
         self.assertEqual(links.piece("x](u)", 1), (4, False))
+        self.assertEqual(links.piece(']( "a b")'), (9, False))
         self.assertIsNone(links.piece("</mark>"))
         self.assertIsNone(links.piece("](u"))
 
