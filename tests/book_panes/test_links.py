@@ -50,6 +50,12 @@ class FoundTest(unittest.TestCase):
         self.assertEqual(found("[a [b](u) c](v)"), [("b", "](u)")])
         self.assertEqual(found("[[b](u)]"), [("b", "](u)")])
 
+    def test_a_link_without_words_holds_no_link_and_none_holds_it(self):
+        self.assertEqual(found("[ ]([x](u))"), [])
+        self.assertEqual(found("[]([x](u)) [y](v)"), [("y", "](v)")])
+        self.assertEqual(found("[a [ ](u) b](v)"), [])
+        self.assertEqual(found("[[]()]()"), [])
+
     def test_brackets_pair_as_they_nest(self):
         self.assertEqual(found("[a [b [c] d] e](u)"), [("a [b [c] d] e", "](u)")])
         self.assertEqual(found("[a [b](x y) c](v)"), [("a [b](x y) c", "](v)")])

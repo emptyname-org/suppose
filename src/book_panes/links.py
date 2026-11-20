@@ -68,9 +68,9 @@ def read_line(text, begin, end, literal, starts, links):
         tail = TAIL.match(text, place - 1, end)
         if tail is None:
             continue
-        if not image:
-            if not text[start + 1 : place - 1].strip():
-                continue  # nothing to show
+        # an image, and a link without words, stay as written; like a
+        # link, they hold no link and none holds them
+        if not image and text[start + 1 : place - 1].strip():
             links.append(Link(start, place - 1, tail.end()))
         opened.clear()
         place = tail.end()
