@@ -1,5 +1,6 @@
 """Links in the text: which are found, and which the cursor is in."""
 
+import time
 import unittest
 
 from book_panes import links, marks
@@ -79,6 +80,30 @@ class FoundTest(unittest.TestCase):
     def test_long_texts_are_read_in_one_pass(self):
         text = "word [a](u) [ and ( " * 20000
         self.assertEqual(len(found(text)), 20000)
+
+    def test_a_link_that_never_closes_is_given_up_in_one_pass(self):
+        started = time.process_time()
+        for text in (
+            "[x](" + " " * 50000 + "!",
+            "[x](u" + " " * 50000 + "!",
+            '[x](u "t"' + " " * 50000 + "!",
+            "[x](" + "\t " * 50000,
+            '[x](u "' + "a" * 50000,
+            "[x](" + "(a" * 50000,
+            "[x]( " * 50000,
+            "[" + "[a] " * 50000,
+        ):
+            self.assertEqual(links.found(text), [])
+        self.assertIsNone(links.piece("](" + " " * 50000))
+        self.assertLess(time.process_time() - started, 2)
+
+    def test_blanks_belong_to_one_part_of_the_tail(self):
+        for tail in ("](  )", "](  u  )", '](u  "t"  )', "](<u>\t'a b'\t)"):
+            with self.subTest(tail=tail):
+                self.assertEqual(found(f"[w{tail} x"), [("w", tail)])
+        for tail in ('](u "t" x)', "](u v)", '](u "t""t")'):
+            with self.subTest(tail=tail):
+                self.assertEqual(found(f"[w{tail} x"), [])
 
 
 class AroundTest(unittest.TestCase):

@@ -15,12 +15,15 @@ from typing import NamedTuple
 COLORS = ("#1a5fb4", "#78aeed")
 # the words: one line; a pair of brackets within, unless a link of its own
 WORDS = r"(?:[^\[\]\n\\]|\\.|\[[^\[\]\n]*\](?!\())+"
-# behind the words: the destination, in <> or without blanks, and a title
+# Behind the words: the destination, in <> or without blanks, and a title.
+# No two parts can take the same blanks, so a tail that never closes is
+# given up in one pass.
+PART = r"(?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))"
+TITLE = r"(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'|\((?:[^()\\\n]|\\.)*\))"
 TAIL = re.compile(
     r"\]\([ \t]*"
-    r"(?:<[^<>\n]*>|(?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))*)"
-    r"(?:[ \t]+(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'|\((?:[^()\\\n]|\\.)*\)))?"
-    r"[ \t]*\)"
+    r"(?:(?:<[^<>\n]*>|" + PART + r"+)(?:[ \t]+(?:" + TITLE + r"[ \t]*)?)?)?"
+    r"\)"
 )
 LINK = re.compile(r"\[(?P<words>" + WORDS + ")" + TAIL.pattern)
 OPENING = "["
