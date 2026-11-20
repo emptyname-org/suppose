@@ -1,5 +1,6 @@
 """Marks in the text: what marking, recolouring and unmarking change."""
 
+import re
 import time
 import unittest
 
@@ -464,6 +465,8 @@ class View:
         self.focused = 0
         self.handlers = {}
         self.copied = None
+        self.stopped = False
+        self.defaults = []  # the keys left to the view itself
         buffer.set_text(text)
 
     def get_buffer(self):
@@ -490,12 +493,22 @@ class View:
         self.handlers[handler] = None
 
     def emit(self, name, *values):
+        self.stopped = False
         for late in (False, True):
             for entry in list(self.handlers.values()):
                 if entry is not None and entry[:2] == (name, late):
                     entry[2](self, *values, *entry[3])
+                    if self.stopped:
+                        return
             if not late:
+                self.defaults.append(name)
                 getattr(self, "do_" + name.replace("-", "_"))(*values)
+
+    def stop_emission_by_name(self, _name):
+        self.stopped = True
+
+    def scroll_mark_onscreen(self, _mark):
+        pass
 
     def do_backspace(self):
         buffer = self.buffer
@@ -584,12 +597,68 @@ def spin(seconds):
     loop.run()
 
 
+class Plain:
+    """Stands for a text view without marks and without a window. Its word
+    deletion takes the word at the cursor with the blanks between."""
+
+    def __init__(self):
+        self.buffer = Gtk.TextBuffer()
+        self.tried = []
+
+    def get_buffer(self):
+        return self.buffer
+
+    def emit(self, _name, _kind, count):
+        buffer = self.buffer
+        text = buffer.get_text(*buffer.get_bounds(), True)
+        place = buffer.get_property("cursor-position")
+        self.tried.append((text, place))
+        if count < 0:
+            other = re.search(r"\S*\s*\Z", text[:place]).start()
+        else:
+            other = place + re.match(r"\s*\S*", text[place:]).end()
+        at = buffer.get_iter_at_offset
+        buffer.delete(at(min(place, other)), at(max(place, other)))
+
+
+class ShownTest(unittest.TestCase):
+    def shown(self, low, high):
+        buffer = Gtk.TextBuffer()
+        buffer.set_text("ab<x>cd</x><y>ef</y> g")
+        return marks.Shown(buffer, [(2, 5), (7, 14), (16, 20)], low, high)
+
+    def test_the_text_is_what_is_not_hidden(self):
+        self.assertEqual(self.shown(0, 22).text, "abcdef g")
+        self.assertEqual(self.shown(3, 15).text, "cde")
+        self.assertEqual(self.shown(8, 12).text, "")
+
+    def test_a_place_of_the_buffer_is_one_of_the_text(self):
+        shown = self.shown(0, 22)
+        self.assertEqual(
+            [shown.offset(place) for place in (0, 2, 4, 5, 6, 7, 14, 16, 20, 22)],
+            [0, 2, 2, 2, 3, 4, 4, 6, 6, 8],
+        )
+
+    def test_a_place_of_the_text_is_before_what_is_hidden_there(self):
+        shown = self.shown(0, 22)
+        self.assertEqual(
+            [shown.place(offset) for offset in (0, 1, 2, 3, 4, 6, 8)],
+            [0, 1, 2, 6, 7, 16, 22],
+        )
+
+    def test_a_stretch_counts_from_its_beginning(self):
+        shown = self.shown(5, 16)
+        self.assertEqual((shown.offset(15), shown.place(3)), (3, 15))
+        self.assertEqual(self.shown(8, 12).place(0), 8)
+
+
 class MarkerTest(unittest.TestCase):
     def editor(self, text, buffer=None):
         self.buffer = buffer or Gtk.TextBuffer()
         self.view = View(self.buffer, text)
         self.style = Style()
-        self.marker = marks.Marker(self.view, self.style)
+        self.plain = Plain()
+        self.marker = marks.Marker(self.view, self.style, self.plain)
         self.addCleanup(self.marker.close)
         return self.marker
 
@@ -820,10 +889,69 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(self.text(), f"one {Y}wo{END}three")
         self.assertEqual(self.cursor(), self.text().index(END))
         self.assertIsNone(self.marker.back)
-        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.CHARS, -1)
         self.assertEqual(self.text(), f"one {Y}w{END}three")
         self.view.emit("delete-from-cursor", Gtk.DeleteType.PARAGRAPH_ENDS, 1)
         self.assertEqual(self.text(), f"one {Y}w{END}three")
+
+    def test_a_word_is_deleted_as_it_shows(self):
+        text = f"{Y}one{END}{G}two{END} three"
+        self.editor(text)
+        self.put(text.rindex(END))
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.assertEqual((self.text(), self.cursor()), (" three", 0))
+        self.assertEqual(self.view.defaults, [])
+        self.buffer.undo()
+        self.assertEqual(self.text(), text)  # one step
+        self.put(0)
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
+        self.assertEqual((self.text(), self.cursor()), (" three", 0))
+
+    def test_a_word_beside_a_mark_is_deleted_with_what_shows_of_it(self):
+        self.editor(f"a {Y}one{END}two b")
+        self.put(" b")
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.assertEqual(self.text(), "a  b")
+        self.editor(f"a one{Y}two{END} b")
+        self.put("one")
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
+        self.assertEqual(self.text(), "a  b")
+
+    def test_words_with_no_tag_in_the_way_are_left_to_the_editor(self):
+        self.editor(f"{Y}one{END} two three")
+        self.put(len(self.text()))
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.assertEqual(self.view.defaults, ["delete-from-cursor"])
+        self.assertEqual(self.plain.tried, [("one two three", 13)])
+        self.editor("one two three")
+        self.put(13)
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.assertEqual(self.view.defaults, ["delete-from-cursor"])
+        self.assertEqual(self.plain.tried, [])  # no marks, nothing to ask
+
+    def test_a_word_far_from_the_cursor_is_found(self):
+        self.editor(f"zero\n{Y}one{END}{G}two{END}" + "\n" * 6)
+        self.put(len(self.text()))
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.assertEqual(self.text(), "zero\n")
+        self.assertEqual(
+            self.plain.tried, [("\n\n", 2), ("zero\nonetwo\n\n\n\n\n\n", 17)]
+        )
+
+    def test_nothing_to_delete_is_left_to_the_editor(self):
+        self.editor(f"{Y}one{END}")
+        self.put(END)
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
+        self.assertEqual(self.text(), f"{Y}one{END}")
+        self.assertEqual(self.view.defaults, ["delete-from-cursor"])
+
+    def test_no_word_is_deleted_where_nothing_may_be(self):
+        text = f"{Y}one{END}{G}two{END}"
+        self.editor(text)
+        self.view.editable = False
+        self.put(text.rindex(END))
+        self.view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+        self.assertEqual(self.text(), text)
 
     def test_a_mark_goes_with_the_last_of_its_text(self):
         self.editor(f"one {Y}two{END} three")

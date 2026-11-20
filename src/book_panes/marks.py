@@ -32,7 +32,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
 # name -> background in the editor on a light theme, on a dark one
 COLORS = {
@@ -499,12 +499,64 @@ def tidy(text, place):
     )
 
 
+WORD_LINES = 2  # around the cursor: where a word to delete is looked for first
+
+
+def plain_twin(view):
+    """A text view of the kind the editor is built on, with no window: a
+    key tried on it tells what the key does to a text without marks."""
+    kind = view.__gtype__
+    while kind.name not in ("GtkSourceView", "GtkTextView"):
+        kind = kind.parent
+    twin = GObject.new(kind)
+    twin.get_buffer().set_enable_undo(False)
+    return twin
+
+
+class Shown:
+    """A stretch of the buffer as it shows, without the hidden tags, and
+    which place of the buffer a place of that text is."""
+
+    def __init__(self, buffer, hidden, low, high):
+        at = buffer.get_iter_at_offset
+        self.pieces = []  # (place in the text shown, place in the buffer, length)
+        self.low = low
+        parts = []
+        length, place = 0, low
+        for start, end in [*hidden, (high, high)]:
+            start, end = min(max(start, low), high), min(max(end, low), high)
+            if start > place:
+                self.pieces.append((length, place, start - place))
+                parts.append(buffer.get_slice(at(place), at(start), True))
+                length += start - place
+            place = max(place, end)
+        self.text = "".join(parts)
+
+    def offset(self, place):
+        """The place of the buffer in the text shown."""
+        for begins, start, length in self.pieces:
+            if place <= start:
+                return begins
+            if place <= start + length:
+                return begins + place - start
+        return len(self.text)
+
+    def place(self, offset):
+        """The place of the text shown in the buffer, before what is
+        hidden there."""
+        for begins, start, length in self.pieces:
+            if offset <= begins + length:
+                return start + offset - begins
+        return self.low
+
+
 class Marker:
     """The marks of one editor: marking, painting what is marked, and
     keeping the hidden tags whole while the text is written by hand."""
 
-    def __init__(self, view, style=None):
+    def __init__(self, view, style=None, plain=None):
         self.view = view
+        self.plain = plain  # a view without marks, made when first needed
         self.buffer = buffer = view.get_buffer()
         self.timer = 0  # the paint that waits for the main loop
         self.stale = True  # the text changed since it was painted
@@ -551,6 +603,7 @@ class Marker:
         for source, handler in self.handlers:
             source.disconnect(handler)
         self.handlers = []
+        self.plain = None
         self._forget_arrived()
         self._forget_back()
 
@@ -815,15 +868,19 @@ class Marker:
                 self._hidden_before(buffer.get_iter_at_mark(buffer.get_insert()))
             )
 
-    def _on_delete(self, _view, kind, count):
+    def _on_delete(self, view, kind, count):
         """Delete before a hidden tag deletes the text behind the tag,
-        and the cursor stays where it is."""
+        and the cursor stays where it is. Words are deleted as they
+        show."""
         buffer = self.buffer
         self._forget_back()
         if buffer.get_has_selection() or kind not in (
             Gtk.DeleteType.CHARS,
             Gtk.DeleteType.WORD_ENDS,
         ):
+            return
+        if kind == Gtk.DeleteType.WORD_ENDS and count and self._delete_words(count):
+            view.stop_emission_by_name("delete-from-cursor")
             return
         cursor = buffer.get_iter_at_mark(buffer.get_insert())
         if count < 0:
@@ -833,6 +890,52 @@ class Marker:
             if after is not None:
                 self.back = buffer.create_mark(None, cursor, True)
                 self._steer(after)
+
+    def _delete_words(self, count):
+        """Delete the words an editor without marks deletes from the text
+        as it shows: a hidden tag ends no word. False where no hidden tag
+        is in the way; the editor deletes there itself."""
+        buffer = self.buffer
+        hidden = self._ranges(self.hide)
+        if not hidden:
+            return False
+        cursor = buffer.get_iter_at_mark(buffer.get_insert())
+        line, size = cursor.get_line(), buffer.get_char_count()
+        near = (
+            buffer.get_iter_at_line(max(0, line - WORD_LINES))[1].get_offset(),
+            buffer.get_iter_at_line(line + WORD_LINES + 1)[1].get_offset(),
+        )
+        for low, high in (near, (0, size)):
+            shown = Shown(buffer, hidden, low, high)
+            first, last = self._plain_words(
+                shown.text, shown.offset(cursor.get_offset()), count
+            )
+            # words that reach the edge may go on beyond it: look at it all
+            if (first > 0 or low == 0) and (last < len(shown.text) or high == size):
+                break
+        start, end = shown.place(first), shown.place(last)
+        if first == last or not any(
+            begins <= end and ends >= start for begins, ends in hidden
+        ):
+            return False
+        at = buffer.get_iter_at_offset
+        buffer.begin_user_action()
+        buffer.delete_interactive(at(start), at(end), self.view.get_editable())
+        buffer.end_user_action()
+        self.view.scroll_mark_onscreen(buffer.get_insert())
+        return True
+
+    def _plain_words(self, text, cursor, count):
+        """What the deletion of words takes from the text without marks,
+        the cursor at the place: from where to where."""
+        if self.plain is None:
+            self.plain = plain_twin(self.view)
+        plain = self.plain.get_buffer()
+        plain.set_text(text)
+        plain.place_cursor(plain.get_iter_at_offset(cursor))
+        self.plain.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, count)
+        first = plain.get_iter_at_mark(plain.get_insert()).get_offset()
+        return first, first + len(text) - plain.get_char_count()
 
     def _on_delete_done(self, *_args):
         if self.back is not None:

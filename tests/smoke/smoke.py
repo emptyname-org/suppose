@@ -565,6 +565,37 @@ def scenario(app):
         view.get_text() == typed.replace("First chapter.", ""),
     )
     buffer.undo()
+
+    # a word is deleted as it shows, whatever tags hide in it
+    buffer.place_cursor(buffer.get_end_iter())
+    typing(" xunoxdue tre")
+    whole = shown()
+    put(" tre")
+    view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+    plain = shown()
+    buffer.undo()
+    for part, color in (("xuno", "yellow"), ("xdue", "green")):
+        select(part)
+        window.activate_action("book." + marks.ACTION, GLib.Variant("s", color))
+    two_marks = f"{opened}xuno{closed}{marks.opening('green')}xdue{closed}"
+    in_two_marks = view.get_text().endswith(two_marks + " tre") and shown() == whole
+    put(closed + " tre")
+    view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, -1)
+    back = shown(), view.get_text()
+    buffer.undo()
+    put(two_marks)
+    view.emit("delete-from-cursor", Gtk.DeleteType.WORD_ENDS, 1)
+    forth = shown(), view.get_text()
+    for _step in range(4):
+        buffer.undo()
+    check(
+        "hidden: a word in two marks is deleted as the one word it shows",
+        in_two_marks
+        and plain == whole.replace("xunoxdue", "")
+        and back == forth == (plain, edited + "  tre")
+        and view.get_text() == edited,
+    )
+
     put("chapter!")
     window.activate_action("book." + marks.CLEAR, None)
     select("!")
