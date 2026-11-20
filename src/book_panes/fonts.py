@@ -26,6 +26,8 @@ EDITOR_SELECTOR = "textview.apostrophe-editor"
 EDITOR_DEFAULT = "Fira Mono,monospace 12"
 SMALLEST = 6
 LARGEST = 72
+LOOK = 100  # ms between two looks at an open chooser
+LOOKS = 100  # looks at one chooser; then its list has no such font
 FACES = Path(__file__).with_name("fira")
 
 PROVIDERS: dict = {}  # display: the provider of the editor's font
@@ -144,8 +146,10 @@ class FontRow:
     def __init__(self, settings, key, title, default, monospace):
         self.settings = settings
         self.key = key
+        self.title = title
         self.default = default
         self.shown = ""
+        self.asked: dict = {}  # open choosers: the timer asking each, its hands
         chooser = Gtk.FontDialog(title=title, modal=True)
         if monospace:
             chooser.set_filter(Gtk.CustomFilter.new(is_monospace))
@@ -163,6 +167,8 @@ class FontRow:
         self.button.connect("notify::font-desc", self._on_chosen)
         self.reset.connect("clicked", lambda _button: settings.reset(key))
         self.handler = settings.connect("changed::" + key, self._show)
+        self.windows = Gtk.Window.get_toplevels()
+        self.watch = self.windows.connect("items-changed", self._on_windows)
         self._show()
 
     def _show(self, *_args):
@@ -182,8 +188,70 @@ class FontRow:
             self.shown = text
             self.settings.set_string(self.key, text)
 
+    def _on_windows(self, windows, position, _removed, added):
+        for index in range(position, position + added):
+            window = windows.get_item(index)
+            if isinstance(window, Gtk.FontChooserDialog):
+                self._ask(window)  # whose it is shows once it has its title
+
+    def _ask(self, chooser):
+        """Has this row's chooser choose the font shown. GTK looks for it
+        in the chooser's list once, as the chooser opens, and fills the
+        list bit by bit after: a font far down is not found, and the list
+        stays at its top with none chosen. So the chooser is asked again:
+        until a font is chosen (this one, or another by hand), a key, a
+        click or a scroll says the choosing has begun, the chooser closes,
+        or LOOKS looks have passed."""
+        left = [LOOKS]
+
+        def begun(*_given):
+            left[0] = 0
+            return False  # the chooser's as before
+
+        scrolls = Gtk.EventControllerScroll(
+            flags=Gtk.EventControllerScrollFlags.BOTH_AXES
+        )
+        hands = (
+            (Gtk.EventControllerKey(), "key-pressed"),
+            (Gtk.GestureClick(button=0), "pressed"),
+            (scrolls, "scroll"),
+        )
+
+        def look():
+            left[0] -= 1
+            wanted = self.button.get_font_desc()
+            if (
+                left[0] >= 0
+                and wanted is not None
+                and chooser.get_visible()
+                and chooser.get_title() == self.title
+                and chooser.get_font() is None
+            ):
+                chooser.set_font_desc(wanted)
+                if chooser.get_font() is None:
+                    return True  # its list has not come that far
+            self._leave(chooser)
+            return False
+
+        for hand, signal in hands:
+            hand.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            hand.connect(signal, begun)
+            chooser.add_controller(hand)
+        self.asked[chooser] = GLib.timeout_add(LOOK, look), hands
+
+    def _leave(self, chooser):
+        """Asks the chooser no more; the timer of it left to its end."""
+        timer, hands = self.asked.pop(chooser)
+        for hand, _signal in hands:
+            if hand.get_widget() == chooser:  # a closed one has given it up
+                chooser.remove_controller(hand)
+        return timer
+
     def close(self):
         self.settings.disconnect(self.handler)
+        self.windows.disconnect(self.watch)
+        for chooser in list(self.asked):
+            GLib.source_remove(self._leave(chooser))
 
 
 def add_rows(dialog, settings, large_text_row):

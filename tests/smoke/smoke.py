@@ -843,6 +843,37 @@ def scenario(app):
         and named[fonts.EDITOR_KEY][0].startswith("Fira Mono")
         and all(names and "None" not in names[0] for names in named.values()),
     )
+    opened = {}
+    for key, row in rows.items():
+        row.button.activate()
+        chooser = None
+        for _attempt in range(40):  # its list fills bit by bit
+            yield 200
+            chooser = next(
+                (
+                    top
+                    for top in Gtk.Window.list_toplevels()
+                    if isinstance(top, Gtk.FontChooserDialog)
+                ),
+                None,
+            )
+            if chooser is not None and chooser.get_font() is not None:
+                break
+        opened[key] = (
+            chooser.get_font() if chooser is not None else None,
+            row.button.get_font_desc().to_string(),
+            len(row.asked),
+        )
+        if chooser is not None:
+            chooser.close()
+        yield 300
+    check(
+        "fonts: the chooser opens on the font in use",
+        sorted(opened) == [fonts.EDITOR_KEY, fonts.TERMINAL_KEY]
+        and all(found == shown and not asked for found, shown, asked in opened.values())
+        and opened[fonts.EDITOR_KEY][0].startswith("Fira Mono")
+        and window.get_visible_dialog() is dialog,
+    )
     rows[fonts.EDITOR_KEY].button.set_font_desc(
         Pango.FontDescription.from_string("Serif 20")
     )

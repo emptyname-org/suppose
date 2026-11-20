@@ -127,6 +127,115 @@ class FontButton(Widget):
         return self.description
 
 
+class Windows:
+    """The windows of the process, as a list that tells of a new one."""
+
+    def __init__(self):
+        self.items = []
+        self.handlers = {}
+        self.serial = 0
+
+    def connect(self, _signal, handler):
+        self.serial += 1
+        self.handlers[self.serial] = handler
+        return self.serial
+
+    def disconnect(self, handler):
+        del self.handlers[handler]
+
+    def get_item(self, index):
+        return self.items[index]
+
+    def open(self, window):
+        self.items.append(window)
+        for handler in list(self.handlers.values()):
+            handler(self, len(self.items) - 1, 0, 1)
+        return window
+
+
+class Hand(Widget):
+    """A controller of events: of the widget it is added to."""
+
+    widget = None
+    phase = None
+
+    def set_propagation_phase(self, phase):
+        self.phase = phase
+
+    def get_widget(self):
+        return self.widget
+
+
+class Chooser(Widget):
+    """GTK's chooser of fonts: its list fills bit by bit, and it chooses
+    the font asked for only when the list has it."""
+
+    def __init__(self, title, *listed):
+        super().__init__()
+        self.title = title
+        self.listed = list(listed)
+        self.chosen = None
+        self.asks = 0
+        self.hands = []
+
+    def get_title(self):
+        return self.title
+
+    def get_visible(self):
+        return self.visible
+
+    def get_font(self):
+        return self.chosen
+
+    def set_font_desc(self, description):
+        self.asks += 1
+        name = description.to_string()
+        self.chosen = name if name in self.listed else None
+
+    def add_controller(self, hand):
+        hand.widget = self
+        self.hands.append(hand)
+
+    def remove_controller(self, hand):
+        if hand.widget is not self:
+            raise AssertionError("not a controller of this widget")
+        hand.widget = None
+        self.hands.remove(hand)
+
+    def hand(self, signal):
+        return next(hand for hand in self.hands if signal in hand.handlers)
+
+    def close(self):
+        self.visible = False
+        for hand in self.hands:  # as GTK does with a window that goes
+            hand.widget = None
+        self.hands = []
+
+
+class Clock:
+    """GLib's timers, run by hand."""
+
+    Error = GLib.Error
+
+    def __init__(self):
+        self.timers = {}
+        self.serial = 0
+
+    def timeout_add(self, _interval, callback):
+        self.serial += 1
+        self.timers[self.serial] = callback
+        return self.serial
+
+    def source_remove(self, timer):
+        del self.timers[timer]
+
+    def tick(self, times=1):
+        for _time in range(times):
+            for timer, callback in list(self.timers.items()):
+                if not callback():
+                    del self.timers[timer]
+
+
 class LargeTextRow(Widget):
     def __init__(self, page):
         super().__init__()
@@ -147,9 +256,17 @@ class Provider:
 def toolkit():
     """Gtk and Adw as far as the rows need them, without a display."""
     added = []
+    windows = Windows()
     gtk = SimpleNamespace(
         FontDialog=Widget,
         FontDialogButton=FontButton,
+        FontChooserDialog=Chooser,
+        Window=SimpleNamespace(get_toplevels=lambda: windows),
+        EventControllerKey=Hand,
+        GestureClick=Hand,
+        EventControllerScroll=Hand,
+        EventControllerScrollFlags=SimpleNamespace(BOTH_AXES="both"),
+        PropagationPhase=SimpleNamespace(CAPTURE="capture"),
         Button=Widget,
         Align=SimpleNamespace(CENTER="center"),
         CustomFilter=SimpleNamespace(new=lambda shown: shown),
@@ -160,6 +277,7 @@ def toolkit():
         STYLE_PROVIDER_PRIORITY_APPLICATION=600,
         Settings=SimpleNamespace(get_default=lambda: None),
         added=added,
+        windows=windows,
     )
     adw = SimpleNamespace(
         ActionRow=Widget, PreferencesGroup=Widget, PreferencesPage=object
@@ -248,7 +366,8 @@ class Faked(unittest.TestCase):
 
     def setUp(self):
         self.gtk, self.adw = toolkit()
-        for name, fake in (("Gtk", self.gtk), ("Adw", self.adw)):
+        self.clock = Clock()
+        for name, fake in (("Gtk", self.gtk), ("Adw", self.adw), ("GLib", self.clock)):
             patch = mock.patch.object(fonts, name, fake)
             patch.start()
             self.addCleanup(patch.stop)
@@ -458,8 +577,112 @@ class RowsTest(Faked):
     def test_closed_preferences_listen_no_more(self):
         self.rows()
         self.assertEqual(len(self.settings.handlers), 2)
+        self.assertEqual(len(self.gtk.windows.handlers), 2)
         self.dialog.emit("closed")
         self.assertEqual(self.settings.handlers, {})
+        self.assertEqual(self.gtk.windows.handlers, {})
+
+    def opened(self, title, *listed):
+        """The rows, and a chooser opened with that title and those fonts."""
+        rows = self.rows()
+        return rows, self.gtk.windows.open(Chooser(title, *listed))
+
+    def test_an_opened_chooser_is_asked_until_it_has_the_font_in_use(self):
+        rows, chooser = self.opened("Editor", "Serif 12")
+        self.clock.tick(3)
+        self.assertEqual((chooser.asks, chooser.chosen), (3, None))
+        self.assertEqual(len(chooser.hands), 3)
+        chooser.listed.append("Fira Mono 12")  # its list has come that far
+        self.clock.tick()
+        self.assertEqual((chooser.asks, chooser.chosen), (4, "Fira Mono 12"))
+        self.assertEqual((rows[fonts.EDITOR_KEY].asked, chooser.hands), ({}, []))
+        self.assertEqual(self.clock.timers, {})
+
+    def test_each_row_asks_its_own_chooser_for_its_font(self):
+        rows, chooser = self.opened("Agent", "Fira Mono 12", "DejaVu Sans Mono 10")
+        self.clock.tick()
+        self.assertEqual((chooser.asks, chooser.chosen), (1, "DejaVu Sans Mono 10"))
+        self.assertEqual([row.asked for row in rows.values()], [{}, {}])
+
+    def test_a_chosen_font_is_asked_for(self):
+        rows = self.rows(**{fonts.EDITOR_KEY: "Serif Bold 20"})
+        chooser = self.gtk.windows.open(Chooser("Editor", "Serif Bold 20"))
+        self.clock.tick()
+        self.assertEqual(chooser.chosen, "Serif Bold 20")
+        self.assertEqual(rows[fonts.EDITOR_KEY].asked, {})
+
+    def test_a_chooser_that_found_the_font_itself_is_left_alone(self):
+        _rows, chooser = self.opened("Editor", "Fira Mono 12")
+        chooser.chosen = "Fira Mono 12"
+        self.clock.tick(2)
+        self.assertEqual((chooser.asks, chooser.hands), (0, []))
+        self.assertEqual(self.clock.timers, {})
+
+    def test_a_font_chosen_by_hand_stays(self):
+        _rows, chooser = self.opened("Editor", "Serif 12")
+        self.clock.tick()
+        chooser.chosen = "Serif 12"
+        chooser.listed.append("Fira Mono 12")
+        self.clock.tick(2)
+        self.assertEqual((chooser.asks, chooser.chosen), (1, "Serif 12"))
+        self.assertEqual(self.clock.timers, {})
+
+    def test_a_key_a_click_or_a_scroll_ends_the_asking(self):
+        for signal in ("key-pressed", "pressed", "scroll"):
+            with self.subTest(signal=signal):
+                rows, chooser = self.opened("Editor")
+                self.clock.tick()
+                hand = chooser.hand(signal)
+                self.assertEqual(hand.phase, "capture")
+                # the chooser gets what the hand did
+                self.assertIs(hand.handlers[signal](hand, 1, 2, 3), False)
+                chooser.listed.append("Fira Mono 12")
+                self.clock.tick(2)
+                self.assertEqual((chooser.asks, chooser.chosen), (1, None))
+                self.assertEqual(
+                    (rows[fonts.EDITOR_KEY].asked, chooser.hands), ({}, [])
+                )
+                self.assertEqual(self.clock.timers, {})
+                self.dialog.emit("closed")  # the next has rows of its own
+
+    def test_a_closed_chooser_is_asked_no_more(self):
+        rows, chooser = self.opened("Editor")
+        self.clock.tick()
+        chooser.close()
+        self.clock.tick(2)
+        self.assertEqual((chooser.asks, rows[fonts.EDITOR_KEY].asked), (1, {}))
+        self.assertEqual(self.clock.timers, {})
+
+    def test_a_font_the_chooser_never_lists_is_given_up(self):
+        with mock.patch.object(fonts, "LOOKS", 4):
+            rows, chooser = self.opened("Editor")
+            self.clock.tick(10)
+        self.assertEqual((chooser.asks, chooser.chosen), (4, None))
+        self.assertEqual((rows[fonts.EDITOR_KEY].asked, chooser.hands), ({}, []))
+        self.assertEqual(self.clock.timers, {})
+
+    def test_a_button_without_a_font_asks_for_none(self):
+        rows, chooser = self.opened("Editor", "Fira Mono 12")
+        rows[fonts.EDITOR_KEY].button.description = None
+        self.clock.tick(2)
+        self.assertEqual((chooser.asks, self.clock.timers), (0, {}))
+
+    def test_another_window_is_not_asked(self):
+        rows = self.rows()
+        self.gtk.windows.open(Widget())
+        self.assertEqual(self.clock.timers, {})
+        self.assertEqual([row.asked for row in rows.values()], [{}, {}])
+
+    def test_closed_preferences_ask_no_more(self):
+        rows, chooser = self.opened("Editor")
+        self.clock.tick()
+        self.dialog.emit("closed")
+        self.assertEqual((self.clock.timers, chooser.hands), ({}, []))
+        self.assertEqual([row.asked for row in rows.values()], [{}, {}])
+        chooser.listed.append("Fira Mono 12")
+        self.gtk.windows.open(Chooser("Editor", "Fira Mono 12"))
+        self.clock.tick()
+        self.assertEqual((chooser.asks, self.clock.timers), (1, {}))
 
 
 if __name__ == "__main__":
