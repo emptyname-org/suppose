@@ -141,7 +141,9 @@ def is_monospace(item):
 
 class FontRow:
     """A row of Preferences: the font of one settings key, and a button that
-    gives the default back."""
+    gives the default back. It listens, to the setting and for a chooser
+    that opens, while it is on the screen: so it ends with Preferences
+    however they go, with their editor's window too."""
 
     def __init__(self, settings, key, title, default, monospace):
         self.settings = settings
@@ -150,6 +152,9 @@ class FontRow:
         self.default = default
         self.shown = ""
         self.asked: dict = {}  # open choosers: the timer asking each, its hands
+        self.listening = False
+        self.handler = self.watch = 0  # of the setting, of the windows
+        self.windows = Gtk.Window.get_toplevels()
         chooser = Gtk.FontDialog(title=title, modal=True)
         if monospace:
             chooser.set_filter(Gtk.CustomFilter.new(is_monospace))
@@ -166,10 +171,16 @@ class FontRow:
         self.row.set_activatable_widget(self.button)
         self.button.connect("notify::font-desc", self._on_chosen)
         self.reset.connect("clicked", lambda _button: settings.reset(key))
-        self.handler = settings.connect("changed::" + key, self._show)
-        self.windows = Gtk.Window.get_toplevels()
-        self.watch = self.windows.connect("items-changed", self._on_windows)
+        self.button.connect("realize", self.open)
+        self.button.connect("unrealize", self.close)
         self._show()
+
+    def open(self, *_given):
+        if not self.listening:
+            self.listening = True
+            self.handler = self.settings.connect("changed::" + self.key, self._show)
+            self.watch = self.windows.connect("items-changed", self._on_windows)
+            self._show()  # what changed while it did not listen
 
     def _show(self, *_args):
         chosen = described(self.settings.get_string(self.key))
@@ -247,11 +258,13 @@ class FontRow:
                 chooser.remove_controller(hand)
         return timer
 
-    def close(self):
-        self.settings.disconnect(self.handler)
-        self.windows.disconnect(self.watch)
-        for chooser in list(self.asked):
-            GLib.source_remove(self._leave(chooser))
+    def close(self, *_given):
+        if self.listening:
+            self.listening = False
+            self.settings.disconnect(self.handler)
+            self.windows.disconnect(self.watch)
+            for chooser in list(self.asked):
+                GLib.source_remove(self._leave(chooser))
 
 
 def add_rows(dialog, settings, large_text_row):
@@ -271,7 +284,7 @@ def add_rows(dialog, settings, large_text_row):
 
     def on_closed(_dialog):
         for row in rows.values():
-            row.close()
+            row.close()  # at once, not when the closed dialog has gone
 
     dialog.connect("closed", on_closed)
     dialog.font_rows = rows

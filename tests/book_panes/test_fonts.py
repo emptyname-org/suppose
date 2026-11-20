@@ -481,7 +481,10 @@ class RowsTest(Faked):
         self.page = Widget()
         self.large = LargeTextRow(self.page)
         self.dialog = Widget()
-        return fonts.add_rows(self.dialog, self.settings, self.large)
+        rows = fonts.add_rows(self.dialog, self.settings, self.large)
+        for row in rows.values():
+            row.button.emit("realize")  # Preferences come on the screen
+        return rows
 
     def test_the_rows_take_the_place_of_large_text(self):
         rows = self.rows()
@@ -581,6 +584,49 @@ class RowsTest(Faked):
         self.dialog.emit("closed")
         self.assertEqual(self.settings.handlers, {})
         self.assertEqual(self.gtk.windows.handlers, {})
+
+    def test_rows_listen_only_while_they_are_on_the_screen(self):
+        self.settings = Settings()
+        rows = fonts.add_rows(Widget(), self.settings, LargeTextRow(Widget()))
+        self.assertEqual((self.settings.handlers, self.gtk.windows.handlers), ({}, {}))
+        row = rows[fonts.EDITOR_KEY]
+        self.assertEqual(row.button.description.to_string(), "Fira Mono 12")
+        self.settings.set_string(fonts.EDITOR_KEY, "Serif 20")  # not heard
+        for each in rows.values():
+            each.button.emit("realize")
+        self.assertEqual(row.button.description.to_string(), "Serif 20")
+        self.assertEqual(len(self.settings.handlers), 2)
+        self.assertEqual(len(self.gtk.windows.handlers), 2)
+        for each in rows.values():
+            each.button.emit("realize")  # twice is once
+        self.assertEqual(len(self.settings.handlers), 2)
+        self.assertEqual(len(self.gtk.windows.handlers), 2)
+
+    def test_an_editor_closed_with_preferences_open_ends_the_listening(self):
+        rows, chooser = self.opened("Editor")
+        self.clock.tick()
+        for row in rows.values():
+            row.button.emit("unrealize")  # no dialog is closed
+        self.assertEqual((self.settings.handlers, self.gtk.windows.handlers), ({}, {}))
+        self.assertEqual((self.clock.timers, chooser.hands), ({}, []))
+        later = self.gtk.windows.open(Chooser("Editor", "Fira Mono 12"))
+        self.assertEqual((later.hands, self.clock.timers), ([], {}))
+        self.dialog.emit("closed")  # and a second ending ends nothing
+        self.assertEqual([row.asked for row in rows.values()], [{}, {}])
+
+    def test_rows_that_come_back_on_the_screen_listen_again(self):
+        rows = self.rows()
+        for row in rows.values():
+            row.button.emit("unrealize")
+        self.settings.set_string(fonts.EDITOR_KEY, "Serif 20")
+        for row in rows.values():
+            row.button.emit("realize")
+        self.assertEqual(
+            rows[fonts.EDITOR_KEY].button.description.to_string(), "Serif 20"
+        )
+        chooser = self.gtk.windows.open(Chooser("Editor", "Serif 20"))
+        self.clock.tick()
+        self.assertEqual(chooser.chosen, "Serif 20")
 
     def opened(self, title, *listed):
         """The rows, and a chooser opened with that title and those fonts."""
