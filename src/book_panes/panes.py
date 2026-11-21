@@ -25,7 +25,7 @@ gi.require_version("Vte", "3.91")
 from apostrophe import config
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango, Vte
 
-from . import APP_ID, agents, channel, engines, fonts, marks, paste
+from . import APP_ID, agents, channel, colors, engines, fonts, marks, paste
 from .folders import (
     ATTRIBUTES,
     FolderListing,
@@ -51,29 +51,6 @@ AGENT_SHARE = 0.38  # of the window width, up to TERMINAL_COLUMNS
 TERMINAL_COLUMNS = 84
 TERMINAL_PADDING = 26
 WINDOW_SIZE = (1760, 1040)  # upper bound, reduced to fit the monitor
-# terminal colours by app theme (dark or not): foreground, background, palette
-TERMINAL_COLORS = {
-    False: (
-        "#1e1e1e",
-        "#ffffff",
-        (
-            "#24292e", "#d73a49", "#28a745", "#b08800",
-            "#0366d6", "#6f42c1", "#1b7c83", "#6a737d",
-            "#959da5", "#cb2431", "#22863a", "#9a6700",
-            "#005cc5", "#5a32a3", "#3192aa", "#d1d5da",
-        ),
-    ),
-    True: (
-        "#deddda",
-        "#1d1d20",
-        (
-            "#241f31", "#c01c28", "#2ec27e", "#f5c211",
-            "#1e78e4", "#9841bb", "#0ab9dc", "#c0bfbc",
-            "#5e5c64", "#ed333b", "#57e389", "#f8e45c",
-            "#51a1ff", "#c061cb", "#4fd2fd", "#f6f5f4",
-        ),
-    ),
-}  # fmt: skip
 
 CSS = """
 vte-terminal.book-terminal { padding: 10px 12px; }
@@ -128,12 +105,6 @@ def launch_editor(folder):
         envp=[f"{name}={value}" for name, value in environ.items()],
         flags=GLib.SpawnFlags.DEFAULT,
     )
-
-
-def rgba(spec):
-    color = Gdk.RGBA()
-    color.parse(spec)
-    return color
 
 
 def default_window_size(display):
@@ -246,7 +217,7 @@ class BookPanes:
         self.restart_pending = False  # the agent was told to go, start anew
         self.closed = False
         self.current_handler = 0
-        self.font_handlers = []
+        self.setting_handlers = []
         self.wanted = None  # file asked for, shown once edits are saved
         self.serial = 0  # of the text in the editor: grows when another comes
         self.places = {}  # file uri -> Place, for when it is shown again
@@ -375,7 +346,7 @@ class BookPanes:
         terminal.add_controller(focus)
         self.terminal = terminal
         self.style = Adw.StyleManager.get_default()
-        self.style_handler = self.style.connect("notify::dark", self._color_terminal)
+        self.style_handler = self.style.connect("notify::dark", self._on_theme)
         self._color_terminal()
 
         title = os.environ.get("BOOK_AGENT_TITLE") or "Agent"
@@ -403,11 +374,34 @@ class BookPanes:
         header.pack_start(restart)
         return pane
 
+    def _on_theme(self, *_args):
+        self._color_terminal()
+        if self.setting_handlers:  # the editor is set up
+            self._color_editor()
+
     def _color_terminal(self, *_args):
-        """The terminal follows the app's light or dark theme."""
-        foreground, background, palette = TERMINAL_COLORS[self.style.get_dark()]
-        self.terminal.set_colors(
-            rgba(foreground), rgba(background), [rgba(spec) for spec in palette]
+        """The terminal has the colours chosen, or those of the app's
+        light or dark theme."""
+        settings = self.window.settings
+        colors.use_in_terminal(
+            self.terminal,
+            settings.get_string(colors.TERMINAL_TEXT_KEY),
+            settings.get_string(colors.TERMINAL_GROUND_KEY),
+            self.style.get_dark(),
+        )
+
+    def _color_editor(self, *_args):
+        """The editor has the colours chosen, or those of Apostrophe's
+        theme; the marks go with its background."""
+        window = self.window
+        settings = window.settings
+        self.marker.shade(
+            colors.use_in_editor(
+                window.textview,
+                settings.get_string(colors.EDITOR_TEXT_KEY),
+                settings.get_string(colors.EDITOR_GROUND_KEY),
+                colors.EDITOR_COLORS[colors.theme(settings, self.style)],
+            )
         )
 
     def _wrap_window(self):
@@ -573,15 +567,21 @@ class BookPanes:
         marks.install(actions, self.marker)
         self.mark_button = marks.menu_button("book")
         window.headerbar.headerbar.pack_start(self.mark_button)  # beside Save
-        self.font_handlers = [
+        self.setting_handlers = [
             window.settings.connect("changed::" + key, show)
             for key, show in (
                 (fonts.EDITOR_KEY, self._show_editor_font),
                 (fonts.TERMINAL_KEY, self._show_terminal_font),
+                (colors.EDITOR_TEXT_KEY, self._color_editor),
+                (colors.EDITOR_GROUND_KEY, self._color_editor),
+                (colors.THEME_KEY, self._color_editor),
+                (colors.TERMINAL_TEXT_KEY, self._color_terminal),
+                (colors.TERMINAL_GROUND_KEY, self._color_terminal),
             )
         ]
         self._show_editor_font()
         self._show_terminal_font()
+        self._color_editor()
         window.connect("destroy", self.close)
         # the file monitor can be late or unavailable; a stat a second is cheap
         self.disk_poll_timer = GLib.timeout_add_seconds(
@@ -638,9 +638,9 @@ class BookPanes:
         if self.current_handler:
             self.window.current.disconnect(self.current_handler)
             self.current_handler = 0
-        for handler in self.font_handlers:
+        for handler in self.setting_handlers:
             self.window.settings.disconnect(handler)
-        self.font_handlers = []
+        self.setting_handlers = []
         for name in (
             "autosave_timer",
             "sync_timer",

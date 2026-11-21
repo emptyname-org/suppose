@@ -868,6 +868,26 @@ class MarkerTest(unittest.TestCase):
         self.style.turn(False)
         self.assertEqual(tag.get_property("background-rgba").to_string(), light)
 
+    def test_a_background_of_its_own_shade_is_painted_for_whatever_the_theme(self):
+        marker = self.editor("one")
+
+        def painted():
+            return (
+                marker.tags["yellow"].get_property("background-rgba").to_string(),
+                marker.link.get_property("foreground-rgba").to_string(),
+            )
+
+        light = painted()
+        self.style.turn(True)
+        dark = painted()
+        marker.shade(False)  # a light background in the dark theme
+        self.assertEqual(painted(), light)
+        marker.shade(True)
+        self.style.turn(False)
+        self.assertEqual(painted(), dark)
+        marker.shade(None)  # the theme's again
+        self.assertEqual(painted(), light)
+
     def test_hemingway_mode_lets_marks_come_and_go(self):
         marker = self.editor("one two three", Hemingway())
         self.buffer.hemingway_mode = True

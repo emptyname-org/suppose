@@ -14,7 +14,7 @@
   through pandoc and `paste.lua`), marks (text marked in colours, the Mark
   menu; what the editor hides), links (their markup, hidden by marks), fonts
   (the editor's and the terminal's, the rows of Preferences; `fira/`: Fira
-  Mono).
+  Mono), colors (their text and background, the rows of Preferences).
   `src/bin/`: launcher and agent tools.
   `assets/`: menu entry and icons. `tests/` mirrors `src/`; `tests/smoke/`
   drives the built editor. `tools/`: build and audit.

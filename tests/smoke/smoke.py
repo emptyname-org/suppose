@@ -19,8 +19,21 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Vte", "3.91")
+gi.require_version("GtkSource", "5")
+gi.require_version("Graphene", "1.0")
 from apostrophe import config
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango, Vte
+from gi.repository import (
+    Adw,
+    Gdk,
+    Gio,
+    GLib,
+    GObject,
+    Graphene,
+    Gtk,
+    GtkSource,
+    Pango,
+    Vte,
+)
 
 Gio.Resource._register(
     Gio.resource_load(os.path.join(config.PKGDATA_DIR, "apostrophe.gresource"))
@@ -33,9 +46,11 @@ from apostrophe.preview_security import PreviewSecurity, PreviewSecurityHandler
 from book_panes import (
     agents,
     channel,
+    colors,
     engines,
     folders,
     fonts,
+    links,
     marks,
     panes,
     paste,
@@ -95,6 +110,26 @@ def terminal_text(book):
 
 def terminal_is_light(book):
     return book.terminal.get_color_background_for_draw().red > 0.5
+
+
+def told(color):
+    return colors.chosen(color.to_string())
+
+
+def ground(widget):
+    """The colour a widget is drawn in at its corner, where no text is."""
+    paintable = Gtk.WidgetPaintable.new(widget)
+    snapshot = Gtk.Snapshot()
+    paintable.snapshot(snapshot, widget.get_width(), widget.get_height())
+    texture = (
+        widget.get_native()
+        .get_renderer()
+        .render_texture(snapshot.to_node(), Graphene.Rect().init(2, 2, 1, 1))
+    )
+    pixels = Gdk.TextureDownloader.new(texture)
+    pixels.set_format(Gdk.MemoryFormat.R8G8B8A8)
+    red, green, blue = pixels.download_bytes()[0].get_data()[:3]
+    return f"#{red:02x}{green:02x}{blue:02x}"
 
 
 def append(window, text):
@@ -907,6 +942,95 @@ def scenario(app):
         and window.settings.get_string(fonts.EDITOR_KEY) == ""
         and window.settings.get_string(fonts.TERMINAL_KEY) == "",
     )
+
+    tints = getattr(dialog, "color_rows", {})
+    marker = book.marker
+
+    def editor_colors():
+        return (
+            told(view.get_color()),
+            ground(view),
+            told(view.markup.tag_code_text.get_property("background-rgba")),
+            told(marker.tags["yellow"].get_property("background-rgba")),
+            told(marker.link.get_property("foreground-rgba")),
+        )
+
+    def agent_ground():
+        return told(book.terminal.get_color_background_for_draw())
+
+    own = editor_colors(), agent_ground()
+    light = colors.EDITOR_COLORS["light"]
+    check(
+        "colors: Preferences offer the text's and the background's, the theme's shown",
+        list(tints)
+        == [
+            colors.EDITOR_TEXT_KEY,
+            colors.EDITOR_GROUND_KEY,
+            colors.TERMINAL_TEXT_KEY,
+            colors.TERMINAL_GROUND_KEY,
+        ]
+        and [row.shown for row in tints.values()]
+        == [*light, *colors.TERMINAL_COLORS[False][:2]]
+        and not any(row.reset.get_sensitive() for row in tints.values())
+        and own[0][:2] == light
+        and (own[0][3:], own[1])
+        == ((marks.COLORS["yellow"][0], links.COLORS[0]), "#ffffff"),
+    )
+    schemes = GtkSource.StyleSchemeManager.get_default()
+    check(
+        "colors: the editor's own are those of Apostrophe's themes",
+        all(
+            (colors.chosen(text.props.foreground), colors.chosen(text.props.background))
+            == pair
+            for pair, text in (
+                (pair, schemes.get_scheme(name).get_style("text"))
+                for name, pair in colors.EDITOR_COLORS.items()
+            )
+        ),
+    )
+    for key, color in zip(tints, ("#ffff00", "#400040", "#93a1a1", "#002b36")):
+        tints[key].button.set_rgba(colors.rgba(color))
+    yield 600
+    chosen = (
+        "#ffff00",
+        "#400040",
+        colors.mixed("#400040", "#ffff00", colors.CODE_SHARE),
+        marks.COLORS["yellow"][1],
+        links.COLORS[1],
+    )
+    check(
+        "colors: the editor takes those chosen; code, marks and links go with them",
+        [window.settings.get_string(key) for key in tints]
+        == ["#ffff00", "#400040", "#93a1a1", "#002b36"]
+        and editor_colors() == chosen
+        and all(row.reset.get_sensitive() for row in tints.values()),
+    )
+    check("colors: the agent takes its own", agent_ground() == "#002b36")
+    style = Adw.StyleManager.get_default()
+    style.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+    yield 600
+    check(
+        "colors: those chosen stay in another theme",
+        style.get_dark() and (editor_colors(), agent_ground()) == (chosen, "#002b36"),
+    )
+    tints[colors.EDITOR_TEXT_KEY].reset.emit("clicked")
+    tints[colors.TERMINAL_GROUND_KEY].reset.emit("clicked")
+    yield 600
+    check(
+        "colors: one given back is the theme's, the other stays",
+        editor_colors()[:2] == (colors.EDITOR_COLORS["dark"][0], "#400040")
+        and agent_ground() == colors.TERMINAL_COLORS[True][1]
+        and tints[colors.EDITOR_TEXT_KEY].shown == colors.EDITOR_COLORS["dark"][0],
+    )
+    style.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+    for row in tints.values():
+        row.reset.emit("clicked")
+    yield 600
+    check(
+        "colors: the theme's come back",
+        (editor_colors(), agent_ground()) == own
+        and all(window.settings.get_string(key) == "" for key in tints),
+    )
     dialog.close()
     yield 300
     check(
@@ -914,7 +1038,8 @@ def scenario(app):
         not any(
             GObject.signal_handler_is_connected(row.settings, row.handler)
             for row in rows.values()
-        ),
+        )
+        and not any(row.handlers for row in tints.values()),
     )
     view.grab_focus()
 

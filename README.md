@@ -25,7 +25,9 @@ agent's terminal on the right.
   shows them, going to the tree or the agent does not.
 - **Preferences**: font and size of the editor and of the agent's terminal,
   each with a button for the default (Fira Mono, which comes with the
-  application, fitted to the width; the system's monospace font).
+  application, fitted to the width; the system's monospace font). Their
+  text and background colours: the theme's until one is chosen, and a chosen
+  one stays in every theme.
 - **Agent**: a terminal running Claude Code or Codex, chosen in the pane's
   header, in the working folder. Shift+Enter breaks a line, Ctrl+Shift+C and
   Ctrl+Shift+V copy and paste.

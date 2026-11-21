@@ -431,7 +431,7 @@
          self.separator.unparent()
 --- a/lib/python3/dist-packages/apostrophe/preferences_dialog.py
 +++ b/lib/python3/dist-packages/apostrophe/preferences_dialog.py
-@@ -153,10 +153,10 @@
+@@ -153,10 +153,11 @@
                             "active",
                             Gio.SettingsBindFlags.DEFAULT)
  
@@ -439,10 +439,11 @@
 -                           self.bigger_text_row,
 -                           "active",
 -                           Gio.SettingsBindFlags.DEFAULT)
-+        # book panes: a font for the text and one for the agent in place
-+        # of Large Text
-+        from book_panes import fonts
++        # book panes: fonts and colours for the text and for the agent in
++        # place of Large Text
++        from book_panes import colors, fonts
 +        fonts.add_rows(self, self.settings, self.bigger_text_row)
++        colors.add_rows(self, self.settings, self.bigger_text_row)
  
      @Gtk.Template.Callback()
      def on_input_format(self, _widget, _index):
@@ -577,7 +578,7 @@
 +mark.orange, .mark-orange { background-color: #ffd8ae; color: #1e1e1e; }
 --- a/share/glib-2.0/schemas/org.gnome.gitlab.somas.Apostrophe.gschema.xml
 +++ b/share/glib-2.0/schemas/org.gnome.gitlab.somas.Apostrophe.gschema.xml
-@@ -128,6 +128,22 @@
+@@ -128,6 +128,50 @@
          Preferred relative size for the text.
        </description>
      </key>
@@ -595,6 +596,34 @@
 +      <description>
 +        book panes: a font as Pango describes one, with its size. Empty for
 +        the system's monospace font.
++      </description>
++    </key>
++    <key name='editor-color' type='s'>
++      <default>''</default>
++      <summary>Colour of the text</summary>
++      <description>
++        book panes: a colour as #rrggbb. Empty for the theme's.
++      </description>
++    </key>
++    <key name='editor-background' type='s'>
++      <default>''</default>
++      <summary>Colour of the background of the text</summary>
++      <description>
++        book panes: a colour as #rrggbb. Empty for the theme's.
++      </description>
++    </key>
++    <key name='terminal-color' type='s'>
++      <default>''</default>
++      <summary>Colour of the text of the agent's terminal</summary>
++      <description>
++        book panes: a colour as #rrggbb. Empty for the theme's.
++      </description>
++    </key>
++    <key name='terminal-background' type='s'>
++      <default>''</default>
++      <summary>Colour of the background of the agent's terminal</summary>
++      <description>
++        book panes: a colour as #rrggbb. Empty for the theme's.
 +      </description>
 +    </key>
      <key name='toolbar-active' type='b'>
