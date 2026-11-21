@@ -391,7 +391,7 @@ class BookPanes:
         window = self.window
         settings = window.settings
         self.marker.shade(
-            colors.use_in_editor(
+            *colors.use_in_editor(
                 window.textview,
                 settings.get_string(colors.EDITOR_TEXT_KEY),
                 settings.get_string(colors.EDITOR_GROUND_KEY),

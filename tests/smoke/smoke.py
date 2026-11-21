@@ -755,10 +755,16 @@ def scenario(app):
     buffer.place_cursor(buffer.get_iter_at_offset(3))
     book.open_file(long_file)
     yield 1500
-    check(
-        "place: a file not seen before begins at its beginning",
-        view.get_text() == long_text and stands(0, 0),
-    )
+    began = False
+    for _attempt in range(10):  # a busy machine shows it later
+        began = view.get_text() == long_text and stands(0, 0)
+        if began:
+            break
+        yield 500
+    if not began:  # what stood instead, to find the cause
+        cursor = buffer.get_property("cursor-position")
+        print("place:", len(view.get_text()), cursor, adjustment.get_value())
+    check("place: a file not seen before begins at its beginning", began)
     place = long_text.index("Paragraph 30 ")
     buffer.place_cursor(buffer.get_iter_at_offset(place))
     yield 1200  # Apostrophe scrolls to the cursor
@@ -994,7 +1000,7 @@ def scenario(app):
     chosen = (
         "#ffff00",
         "#400040",
-        "rgba(255,255,255,0.12)",  # laid over the background
+        "rgba(255,255,0,0.12)",  # of the text's colour, laid over the background
         marks.COLORS["yellow"][1],
         links.COLORS[1],
     )

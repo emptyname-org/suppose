@@ -37,7 +37,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
-from . import links
+from . import colors, links
 
 # name -> background in the editor on a light theme, on a dark one
 COLORS = {
@@ -627,7 +627,7 @@ class Marker:
             **self.tags,
         }
         self.style = style or Adw.StyleManager.get_default()
-        self.dark = None  # the editor, where its colours are not the theme's
+        self.text = self.ground = None  # the editor's colours, not the theme's
         self.handlers = [
             (self.style, self.style.connect("notify::dark", self._on_theme)),
             (buffer, buffer.connect("changed", self._on_changed)),
@@ -1061,17 +1061,22 @@ class Marker:
 
     # ---- painting ------------------------------------------------------------
 
-    def shade(self, dark):
-        """The editor is a dark one, or a light one; None: as the theme
-        has it. Marks and links are painted to be read in it."""
-        self.dark = dark
+    def shade(self, text, ground):
+        """The editor's text and its background have those colours; None:
+        the theme's. Marks are painted to be read under that text, links
+        on that background."""
+        self.text, self.ground = text, ground
         self._on_theme()
 
     def _on_theme(self, *_args):
-        dark = self.style.get_dark() if self.dark is None else self.dark
+        dark = under = self.style.get_dark()
+        if self.text is not None:
+            under = colors.suits_dark(self.text, COLORS.values())
+        if self.ground is not None:
+            dark = colors.suits_dark(self.ground, [links.COLORS])
         for name, tag in self.tags.items():
             color = Gdk.RGBA()
-            color.parse(COLORS[name][1 if dark else 0])
+            color.parse(COLORS[name][1 if under else 0])
             tag.set_property("background-rgba", color)
         color = Gdk.RGBA()
         color.parse(links.COLORS[1 if dark else 0])

@@ -868,7 +868,7 @@ class MarkerTest(unittest.TestCase):
         self.style.turn(False)
         self.assertEqual(tag.get_property("background-rgba").to_string(), light)
 
-    def test_a_background_of_its_own_shade_is_painted_for_whatever_the_theme(self):
+    def test_marks_go_with_a_chosen_text_and_links_with_a_chosen_background(self):
         marker = self.editor("one")
 
         def painted():
@@ -880,13 +880,18 @@ class MarkerTest(unittest.TestCase):
         light = painted()
         self.style.turn(True)
         dark = painted()
-        marker.shade(False)  # a light background in the dark theme
-        self.assertEqual(painted(), light)
-        marker.shade(True)
         self.style.turn(False)
-        self.assertEqual(painted(), dark)
-        marker.shade(None)  # the theme's again
+        marker.shade("#ffffff", None)  # light text is read on the dark marks
+        self.assertEqual(painted(), (dark[0], light[1]))
+        marker.shade(None, "#400040")  # a dark background, the light blue
+        self.assertEqual(painted(), (light[0], dark[1]))
+        marker.shade("#808080", None)  # grey text is no light text
         self.assertEqual(painted(), light)
+        marker.shade("#2e3436", "#fdf6e3")
+        self.style.turn(True)  # the chosen stay in another theme
+        self.assertEqual(painted(), light)
+        marker.shade(None, None)  # the theme's again
+        self.assertEqual(painted(), dark)
 
     def test_hemingway_mode_lets_marks_come_and_go(self):
         marker = self.editor("one two three", Hemingway())

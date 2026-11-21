@@ -4,11 +4,12 @@ Each is a settings key holding a colour ("#rrggbb"): of the text, and of
 its background, in the editor and in the terminal. Empty means the
 theme's. A chosen colour stays whatever the theme.
 
-What is drawn over the editor's background goes with it: the bar at the
-bottom takes both colours; code, marks and links are those of a dark theme
-in a dark editor. A dark editor is one with a dark background chosen, or,
-with the theme's, with light text chosen: the background under it may not
-be the theme's, a style sheet of the user's can give another.
+What is drawn in the editor goes with the colours chosen, and with no
+guess at one that is not: a style sheet of the user's can give the editor
+colours the theme does not have. Code and the markup Apostrophe dims are a
+share of the text's colour laid over the background there is; marks are
+those the chosen text is read on, links those read on the chosen
+background; the bar at the bottom takes both colours.
 """
 
 import gi
@@ -55,11 +56,10 @@ TERMINAL_COLORS = {
         ),
     ),
 }  # fmt: skip
-# Code and the markup Apostrophe dims are a share of white in a dark
-# editor, of black in a light one, laid over the background there is: so
-# they are read on it whatever it is. The shares are near Apostrophe's own.
+# of the ink in the background of code, in the markup Apostrophe dims: near
+# what Apostrophe's themes have
 CODE_SHARE = 0.12
-DIM_SHARE = 0.3
+DIM_SHARE = 0.4
 
 PROVIDERS: dict = {}  # display: the provider of the editor's colours
 
@@ -82,21 +82,38 @@ def chosen(text):
     )
 
 
+def parts(color):
+    return [int(color[place : place + 2], 16) for place in (1, 3, 5)]
+
+
+def lightness(color):
+    """From 0, black, to 1, white: the relative luminance of WCAG."""
+    red, green, blue = (
+        share / 12.92 if share <= 0.04045 else ((share + 0.055) / 1.055) ** 2.4
+        for share in (part / 255 for part in parts(color))
+    )
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast(one, other):
+    """How well two colours are told apart, from 1 to 21: WCAG's ratio."""
+    lighter, darker = sorted((lightness(one), lightness(other)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
 def is_dark(color):
-    """Whether light text is read on the colour."""
-    red, green, blue = (int(color[place : place + 2], 16) for place in (1, 3, 5))
-    return 299 * red + 587 * green + 114 * blue < 127500
+    """Whether white is read on the colour better than black."""
+    return contrast(color, "#ffffff") > contrast(color, "#000000")
 
 
-def shade(text, ground):
-    """Whether an editor with those colours chosen is a dark one: by its
-    background, or by its text, light on a dark one. None with none
-    chosen: as the theme has it."""
-    if ground is not None:
-        return is_dark(ground)
-    if text is not None:
-        return not is_dark(text)
-    return None
+def suits_dark(color, pairs):
+    """PAIRS: colours as a light theme has them and as a dark one has.
+    Whether COLOR is told better from the dark theme's: of each kind, the
+    one it is told worst from decides."""
+    light, dark = zip(*pairs, strict=True)
+    return min(contrast(color, each) for each in dark) > min(
+        contrast(color, each) for each in light
+    )
 
 
 def theme(settings, style):
@@ -110,10 +127,12 @@ def theme(settings, style):
 def editor_css(text, ground):
     """The style sheet of an editor with those colours chosen; None is the
     theme's. Empty with none chosen."""
-    dark = shade(text, ground)
-    if dark is None:
+    if text is None and ground is None:
         return ""
-    ink = "255, 255, 255" if dark else "0, 0, 0"
+    # the ink of code and of dimmed markup: the text's colour, or, with
+    # the theme's text, what is read on the chosen background
+    ink = text or ("#ffffff" if is_dark(ground) else "#000000")
+    ink = ", ".join(str(part) for part in parts(ink))
     rules = [
         f"@define-color code_bg_color rgba({ink}, {CODE_SHARE});",
         f"@define-color link_fg_color rgba({ink}, {DIM_SHARE});",
@@ -132,8 +151,7 @@ def editor_css(text, ground):
 
 def use_in_editor(view, text, ground):
     """Gives the editor the colours the settings TEXT and GROUND name, or
-    the theme's back. Tells whether it is now a dark one; None: as the
-    theme has it."""
+    the theme's back. Tells the two it has now; None: the theme's."""
     display = view.get_display()
     provider = PROVIDERS.get(display)
     if provider is None:
@@ -146,7 +164,7 @@ def use_in_editor(view, text, ground):
     text, ground = chosen(text), chosen(ground)
     provider.load_from_string(editor_css(text, ground))
     view.markup.on_style_updated()  # Apostrophe's tags of code and of markup
-    return shade(text, ground)
+    return text, ground
 
 
 def use_in_terminal(terminal, text, ground, dark):

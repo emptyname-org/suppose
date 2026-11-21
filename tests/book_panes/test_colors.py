@@ -111,28 +111,37 @@ class ChosenTest(unittest.TestCase):
                 self.assertIsNone(colors.chosen(written))
 
 
-class ShadeTest(unittest.TestCase):
-    def test_a_dark_colour_is_one_light_text_is_read_on(self):
-        for color in ("#000000", "#400040", "#002b36", "#2d2d2d", "#7f7f7f"):
+class ContrastTest(unittest.TestCase):
+    def test_two_colours_are_told_apart_from_not_at_all_to_black_on_white(self):
+        self.assertEqual(colors.contrast("#808080", "#808080"), 1)
+        self.assertAlmostEqual(colors.contrast("#000000", "#ffffff"), 21)
+        self.assertEqual(
+            colors.contrast("#400040", "#ffff00"), colors.contrast("#ffff00", "#400040")
+        )
+
+    def test_a_dark_colour_is_one_white_is_read_on_better_than_black(self):
+        for color in ("#000000", "#400040", "#002b36", "#2d2d2d", "#707070"):
             with self.subTest(color=color):
                 self.assertTrue(colors.is_dark(color))
         for color in ("#ffffff", "#f9f3e9", "#ffff00", "#808080"):
             with self.subTest(color=color):
                 self.assertFalse(colors.is_dark(color))
 
-    def test_an_editor_is_dark_by_its_background_or_else_by_its_text(self):
-        for text, ground, dark in (
-            (None, None, None),  # as the theme has it
-            (None, "#400040", True),
-            (None, "#f9f3e9", False),
-            ("#ffff00", "#400040", True),
-            ("#000000", "#101010", True),  # the background tells
-            ("#ffffff", "#fdf6e3", False),
-            ("#ffffff", None, True),  # light text is read on a dark one
-            ("#2e3436", None, False),
+    def test_a_colour_goes_with_the_theme_whose_colours_it_is_told_from(self):
+        pairs = [("#fff0a0", "#6a5c00"), ("#c7e2ff", "#1f4d78")]
+        for color, dark in (
+            ("#2e3436", False),
+            ("#ffffff", True),
+            ("#808080", False),  # no guess by its lightness alone
+            ("#b0b0b0", True),
         ):
-            with self.subTest(text=text, ground=ground):
-                self.assertIs(colors.shade(text, ground), dark)
+            with self.subTest(color=color):
+                self.assertIs(colors.suits_dark(color, pairs), dark)
+
+    def test_the_one_told_worst_decides(self):
+        # told well from one dark colour, not at all from the other
+        pairs = [("#c0c0c0", "#000000"), ("#c0c0c0", "#ffffff")]
+        self.assertFalse(colors.suits_dark("#ffffff", pairs))
 
 
 class ThemeTest(unittest.TestCase):
@@ -178,32 +187,35 @@ class CssTest(unittest.TestCase):
         )
         self.assertNotIn(" color:", sheet)
 
-    def test_code_and_dimmed_markup_are_a_share_of_white_in_a_dark_editor(self):
-        for text, ground in (("#ffff00", "#400040"), (None, "#400040")):
-            with self.subTest(text=text):
-                sheet = colors.editor_css(text, ground)
+    def test_code_and_dimmed_markup_are_a_share_of_the_chosen_text(self):
+        for ground in ("#400040", None):
+            with self.subTest(ground=ground):
+                sheet = colors.editor_css("#ffff00", ground)
                 self.assertIn(
-                    "@define-color code_bg_color rgba(255, 255, 255, 0.12);", sheet
+                    "@define-color code_bg_color rgba(255, 255, 0, 0.12);", sheet
                 )
                 self.assertIn(
-                    "@define-color link_fg_color rgba(255, 255, 255, 0.3);", sheet
+                    "@define-color link_fg_color rgba(255, 255, 0, 0.4);", sheet
                 )
 
-    def test_and_a_share_of_black_in_a_light_one(self):
-        for text, ground in (("#073642", "#fdf6e3"), ("#ffffff", "#fdf6e3")):
-            with self.subTest(text=text):
-                sheet = colors.editor_css(text, ground)
-                self.assertIn("@define-color code_bg_color rgba(0, 0, 0, 0.12);", sheet)
-                self.assertIn("@define-color link_fg_color rgba(0, 0, 0, 0.3);", sheet)
+    def test_with_the_theme_s_text_they_are_what_is_read_on_the_background(self):
+        dark = colors.editor_css(None, "#400040")
+        self.assertIn("@define-color code_bg_color rgba(255, 255, 255, 0.12);", dark)
+        self.assertIn("@define-color link_fg_color rgba(255, 255, 255, 0.4);", dark)
+        light = colors.editor_css(None, "#fdf6e3")
+        self.assertIn("@define-color code_bg_color rgba(0, 0, 0, 0.12);", light)
+        self.assertIn("@define-color link_fg_color rgba(0, 0, 0, 0.4);", light)
 
-    def test_light_text_alone_is_read_on_whatever_dark_background_there_is(self):
-        # the theme's is light, a style sheet of the user's gives a dark one:
-        # code is no light patch under the light text
-        sheet = colors.editor_css("#ffffff", None)
-        self.assertIn("@define-color code_bg_color rgba(255, 255, 255, 0.12);", sheet)
-        self.assertNotIn("#", sheet.split("\n")[0])  # laid over, no colour of its own
-        dark = colors.editor_css("#2e3436", None)
-        self.assertIn("@define-color code_bg_color rgba(0, 0, 0, 0.12);", dark)
+    def test_a_text_colour_alone_guesses_no_background(self):
+        # laid over the background there is: under white text a style sheet
+        # of the user's may have put a black one, under grey text the
+        # theme's white one stays
+        white = colors.editor_css("#ffffff", None)
+        self.assertIn("@define-color code_bg_color rgba(255, 255, 255, 0.12);", white)
+        grey = colors.editor_css("#808080", None)
+        self.assertIn("@define-color code_bg_color rgba(128, 128, 128, 0.12);", grey)
+        self.assertIn("@define-color link_fg_color rgba(128, 128, 128, 0.4);", grey)
+        self.assertNotIn("255", grey)
 
     def test_the_style_sheet_is_one_gtk_reads(self):
         from gi.repository import Gtk
@@ -248,23 +260,23 @@ class UseTest(Faked):
         )
 
     def test_the_editor_takes_the_chosen_colours(self):
-        dark = colors.use_in_editor(self.view, "#FFFF00", "#400040")
+        both = colors.use_in_editor(self.view, "#FFFF00", "#400040")
         provider = colors.PROVIDERS["display"]
         self.assertEqual(provider.loaded, colors.editor_css("#ffff00", "#400040"))
-        self.assertIs(dark, True)
+        self.assertEqual(both, ("#ffff00", "#400040"))
         # above the user's rank, and Apostrophe's tags after the sheet
         self.assertEqual(self.gtk.added, [("display", provider, 801)])
         self.assertEqual(self.updated, [provider.loaded])
 
-    def test_the_editor_tells_whether_it_is_a_dark_one(self):
-        self.assertIs(colors.use_in_editor(self.view, "", "#f9f3e9"), False)
-        self.assertIs(colors.use_in_editor(self.view, "#ffff00", ""), True)
-        self.assertIs(colors.use_in_editor(self.view, "#2e3436", "no colour"), False)
-        self.assertIsNone(colors.use_in_editor(self.view, "", "no colour"))
+    def test_the_editor_tells_the_colours_it_has(self):
+        use = colors.use_in_editor
+        self.assertEqual(use(self.view, "", "#F9F3E9"), (None, "#f9f3e9"))
+        self.assertEqual(use(self.view, "red", "no colour"), ("#ff0000", None))
+        self.assertEqual(use(self.view, "", "no colour"), (None, None))
 
     def test_the_editor_gets_the_theme_back(self):
         colors.use_in_editor(self.view, "#ffff00", "#400040")
-        self.assertIsNone(colors.use_in_editor(self.view, "", ""))
+        self.assertEqual(colors.use_in_editor(self.view, "", ""), (None, None))
         self.assertEqual(colors.PROVIDERS["display"].loaded, "")
         self.assertEqual(len(self.gtk.added), 1)  # one provider a display
         self.assertEqual(self.updated[-1], "")
