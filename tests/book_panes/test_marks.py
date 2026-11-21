@@ -1,5 +1,6 @@
 """Marks in the text: what marking, recolouring and unmarking change."""
 
+import itertools
 import re
 import time
 import unittest
@@ -7,9 +8,9 @@ import unittest
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gio, GLib, GObject, Gtk
+from gi.repository import Gio, GLib, GObject, Gtk, Pango
 
-from book_panes import marks
+from book_panes import colors, links, marks
 
 Y, G, END = '<mark class="yellow">', '<mark class="green">', "</mark>"
 HIDDEN = ("book-mark-tag",)
@@ -750,13 +751,28 @@ class MarkerTest(unittest.TestCase):
         return self.buffer.get_text(first, last, True)
 
     def painted(self, part):
-        """The names of the marker's tags on each character of the part."""
+        """The names of the marker's tags on each character of the part;
+        but for the ink, which whatever is marked has."""
         at = self.text().index(part)
         names = set()
         for place in range(at, at + len(part)):
             tags = self.buffer.get_iter_at_offset(place).get_tags()
-            names.add(tuple(tag.get_property("name") for tag in tags))
+            names.add(
+                tuple(
+                    tag.get_property("name")
+                    for tag in tags
+                    if tag is not self.marker.ink
+                )
+            )
         return names
+
+    def inked(self, part):
+        """Whether each character of the part has the ink of marks."""
+        at = self.text().index(part)
+        return {
+            self.buffer.get_iter_at_offset(place).has_tag(self.marker.ink)
+            for place in range(at, at + len(part))
+        }
 
     def test_the_selection_is_marked_in_one_undo_step(self):
         marker = self.editor("one two three")
@@ -835,7 +851,7 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(applied, [])
         self.put(self.text().rindex(END))
         self.view.type("y")
-        self.assertEqual(applied, [marker.tags["green"]] * 2)
+        self.assertEqual(applied, [marker.ink] * 2 + [marker.tags["green"]] * 2)
         self.assertEqual(self.painted("txhreey"), {("book-mark-green",)})
 
     def test_a_mark_is_painted_at_once(self):
@@ -868,30 +884,158 @@ class MarkerTest(unittest.TestCase):
         self.style.turn(False)
         self.assertEqual(tag.get_property("background-rgba").to_string(), light)
 
-    def test_marks_go_with_a_chosen_text_and_links_with_a_chosen_background(self):
-        marker = self.editor("one")
+    def colours(self):
+        """Of a yellow mark, of the text on a mark, of a link, of the tags
+        of a mark without text. None: the text's own."""
+        marker = self.marker
+        found = []
+        for tag, name in (
+            (marker.tags["yellow"], "background"),
+            (marker.ink, "foreground"),
+            (marker.link, "foreground"),
+            (marker.dim, "foreground"),
+        ):
+            color = tag.get_property(name + "-rgba")
+            found.append(color.to_string() if tag.get_property(name + "-set") else None)
+        return tuple(found)
 
-        def painted():
-            return (
-                marker.tags["yellow"].get_property("background-rgba").to_string(),
-                marker.link.get_property("foreground-rgba").to_string(),
-            )
+    def as_painted(self, *named):
+        return tuple(name and colors.rgba(name).to_string() for name in named)
 
-        light = painted()
+    def underlined(self):
+        link = self.marker.link
+        return link.get_property("underline") != Pango.Underline.NONE
+
+    def test_with_no_colour_chosen_all_is_as_the_theme_has_it(self):
+        self.editor("one")
+        yellow = marks.COLORS["yellow"]
+        self.assertEqual(
+            self.colours(), self.as_painted(yellow[0], None, links.COLORS[0], "gray")
+        )
         self.style.turn(True)
-        dark = painted()
-        self.style.turn(False)
-        marker.shade("#ffffff", None)  # light text is read on the dark marks
-        self.assertEqual(painted(), (dark[0], light[1]))
-        marker.shade(None, "#400040")  # a dark background, the light blue
-        self.assertEqual(painted(), (light[0], dark[1]))
-        marker.shade("#808080", None)  # grey text is no light text
-        self.assertEqual(painted(), light)
-        marker.shade("#2e3436", "#fdf6e3")
-        self.style.turn(True)  # the chosen stay in another theme
-        self.assertEqual(painted(), light)
+        self.assertEqual(
+            self.colours(), self.as_painted(yellow[1], None, links.COLORS[1], "gray")
+        )
+        self.assertFalse(self.underlined())
+
+    def test_a_chosen_background_decides_marks_and_links_whatever_the_theme(self):
+        marker = self.editor("one")
+        yellow = marks.COLORS["yellow"]
+        dark = (yellow[1], marks.INKS[1], links.COLORS[1], "rgba(255,255,255,0.4)")
+        light = (yellow[0], marks.INKS[0], links.COLORS[0], "rgba(0,0,0,0.4)")
+        marker.shade(None, "#400040")  # a dark one in the light theme
+        self.assertEqual(self.colours(), self.as_painted(*dark))
+        self.style.turn(True)
+        self.assertEqual(self.colours(), self.as_painted(*dark))
+        marker.shade(None, "#fdf6e3")  # a light one in the dark theme
+        self.assertEqual(self.colours(), self.as_painted(*light))
         marker.shade(None, None)  # the theme's again
-        self.assertEqual(painted(), dark)
+        self.assertEqual(
+            self.colours(), self.as_painted(yellow[1], None, links.COLORS[1], "gray")
+        )
+
+    def test_a_chosen_text_stays_on_the_marks_it_is_read_on(self):
+        marker = self.editor("one")
+        for text, ground, ink in (
+            ("#000080", None, "#000080"),  # dark blue on the light marks
+            ("#808080", None, marks.INKS[0]),  # grey is not read on them
+            ("#fff0a0", None, marks.INKS[0]),  # nor the colour of a mark itself
+            ("#ffffff", None, marks.INKS[0]),  # nor white, whatever is under it
+            ("#ffff00", "#400040", "#ffff00"),
+            ("#808080", "#000000", marks.INKS[1]),
+            ("#000080", "#000000", marks.INKS[1]),
+        ):
+            with self.subTest(text=text, ground=ground):
+                marker.shade(text, ground)
+                self.assertEqual(self.colours()[1], colors.rgba(ink).to_string())
+
+    def test_a_text_a_style_sheet_gives_is_read_on_the_marks(self):
+        # the light theme, a background chosen black, the text a style
+        # sheet's: light yellow, the colour of the light theme's mark
+        marker = self.editor("one")
+        marker.shade(None, "#000000")
+        mark, ink, _link, _dim = self.colours()
+        self.assertEqual((mark, ink), self.as_painted("#6a5c00", marks.INKS[1]))
+
+    def test_a_link_in_a_mark_is_as_in_one_of_the_themes(self):
+        marker = self.editor("one")
+        marker.shade("#808080", "#000000")
+        blue = marker.tags["blue"].get_property("background-rgba").to_string()
+        pair = self.as_painted(marks.COLORS["blue"][1], links.COLORS[1])
+        self.assertEqual((blue, self.colours()[2]), pair)
+
+    def test_a_link_not_read_on_the_background_has_the_text_s_colour_and_a_line(self):
+        marker = self.editor("one")
+        for ground in ("#808080", "#c0c0c0", "#606060"):
+            with self.subTest(ground=ground):
+                marker.shade(None, ground)
+                self.assertEqual((self.colours()[2], self.underlined()), (None, True))
+        for ground, blue in (("#ffffff", 0), ("#000000", 1), (None, 0)):
+            with self.subTest(ground=ground):
+                marker.shade(None, ground)
+                self.assertEqual(
+                    (self.colours()[2], self.underlined()),
+                    (*self.as_painted(links.COLORS[blue]), False),
+                )
+
+    def test_whatever_is_chosen_marked_text_and_links_are_read(self):
+        marker = self.editor("one")
+        steps = ("00", "55", "aa", "ff")
+        grounds = ["#" + r + g + b for r in steps for g in steps for b in steps]
+        ends = ("00", "ff")
+        texts = [None, "#808080"]
+        texts += ["#" + r + g + b for r in ends for g in ends for b in ends]
+
+        def told(tag, name):
+            return colors.chosen(tag.get_property(name + "-rgba").to_string())
+
+        for ground, text in itertools.product([None, *grounds], texts):
+            marker.shade(text, ground)
+            painted = [told(tag, "background") for tag in marker.tags.values()]
+            kind = [pair[1] for pair in marks.COLORS.values()] == painted
+            with self.subTest(ground=ground, text=text):
+                self.assertEqual(
+                    painted, [pair[kind] for pair in marks.COLORS.values()]
+                )
+                if (text, ground) != (None, None):
+                    ink = told(marker.ink, "foreground")
+                    for mark in painted:
+                        self.assertGreaterEqual(colors.contrast(ink, mark), colors.READ)
+                if marker.link.get_property("foreground-set"):
+                    link = told(marker.link, "foreground")
+                    self.assertEqual(link, links.COLORS[kind])
+                    self.assertFalse(self.underlined())
+                    if ground is not None:
+                        self.assertGreaterEqual(
+                            colors.contrast(link, ground), colors.READ
+                        )
+                else:
+                    self.assertTrue(self.underlined())
+
+    def test_what_is_marked_has_the_ink_of_marks(self):
+        marker = self.editor(
+            f"plain {Y}outer {G}inner{END} rest{END} [word](u) {Y}[page](v){END}"
+        )
+        for part, inked in (
+            ("outer ", True),
+            ("inner", True),
+            (" rest", True),
+            ("page", True),
+            ("plain ", False),
+            ("word", False),
+        ):
+            with self.subTest(part=part):
+                self.assertEqual(self.inked(part), {inked})
+        # under the blue of a link, and under what Apostrophe greys out
+        self.assertEqual(
+            (marker.ink.get_priority(), marker.link.get_priority()), (0, 1)
+        )
+        self.put(self.text().index("outer ") + 1)
+        marker.mark(None)  # the yellow mark goes, with the green one in it
+        self.assertEqual(
+            (self.inked("outer "), self.inked("inner"), self.inked("page")),
+            ({False}, {False}, {True}),
+        )
 
     def test_hemingway_mode_lets_marks_come_and_go(self):
         marker = self.editor("one two three", Hemingway())
@@ -1398,7 +1542,7 @@ class MarkerTest(unittest.TestCase):
         self.style.turn(True)
         dark = marker.link.get_property("foreground-rgba").to_string()
         self.assertNotEqual(light, dark)
-        self.assertEqual(marker.link.get_priority(), 0)
+        self.assertEqual(marker.link.get_priority(), 1)  # above the ink of marks
 
     def test_links_that_go_leave_nothing_behind(self):
         marker = self.editor(self.LINK)

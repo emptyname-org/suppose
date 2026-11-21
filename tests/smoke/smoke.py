@@ -489,7 +489,7 @@ def scenario(app):
     )
     check(
         "mark: painted, its tags hidden",
-        painted("First") == ["book-mark-yellow"]
+        painted("First") == ["book-mark-ink", "book-mark-yellow"]
         and "book-mark-tag" in painted("<mark")
         and "book-mark-tag" in painted("</mark>"),
     )
@@ -518,7 +518,7 @@ def scenario(app):
     check(
         "mark: at the cursor it takes another colour",
         view.get_text() == yellow.replace("yellow", "green")
-        and painted("First") == ["book-mark-green"],
+        and painted("First") == ["book-mark-ink", "book-mark-green"],
     )
     rows[None].emit("clicked")
     check(
@@ -952,6 +952,11 @@ def scenario(app):
     tints = getattr(dialog, "color_rows", {})
     marker = book.marker
 
+    def ink():  # of the text on a mark; None: the text's own
+        if not marker.ink.get_property("foreground-set"):
+            return None
+        return told(marker.ink.get_property("foreground-rgba"))
+
     def editor_colors():
         return (
             told(view.get_color()),
@@ -959,6 +964,7 @@ def scenario(app):
             view.markup.tag_code_text.get_property("background-rgba").to_string(),
             told(marker.tags["yellow"].get_property("background-rgba")),
             told(marker.link.get_property("foreground-rgba")),
+            ink(),
         )
 
     def agent_ground():
@@ -980,7 +986,7 @@ def scenario(app):
         and not any(row.reset.get_sensitive() for row in tints.values())
         and own[0][:2] == light
         and (own[0][3:], own[1])
-        == ((marks.COLORS["yellow"][0], links.COLORS[0]), "#ffffff"),
+        == ((marks.COLORS["yellow"][0], links.COLORS[0], None), "#ffffff"),
     )
     schemes = GtkSource.StyleSchemeManager.get_default()
     check(
@@ -1003,6 +1009,7 @@ def scenario(app):
         "rgba(255,255,0,0.12)",  # of the text's colour, laid over the background
         marks.COLORS["yellow"][1],
         links.COLORS[1],
+        "#ffff00",  # read on the marks, so it stays on them
     )
     check(
         "colors: the editor takes those chosen; code, marks and links go with them",
@@ -1025,6 +1032,7 @@ def scenario(app):
     check(
         "colors: one given back is the theme's, the other stays",
         editor_colors()[:2] == (colors.EDITOR_COLORS["dark"][0], "#400040")
+        and ink() == marks.INKS[1]  # whatever the text is now, read on a mark
         and agent_ground() == colors.TERMINAL_COLORS[True][1]
         and tints[colors.EDITOR_TEXT_KEY].shown == colors.EDITOR_COLORS["dark"][0],
     )

@@ -7,9 +7,10 @@ theme's. A chosen colour stays whatever the theme.
 What is drawn in the editor goes with the colours chosen, and with no
 guess at one that is not: a style sheet of the user's can give the editor
 colours the theme does not have. Code and the markup Apostrophe dims are a
-share of the text's colour laid over the background there is; marks are
-those the chosen text is read on, links those read on the chosen
-background; the bar at the bottom takes both colours.
+share of the text's colour laid over the background there is; marks and
+links are those of a dark theme on a dark background chosen, and what is
+not read there is drawn another way (marks.py); the bar at the bottom
+takes both colours.
 """
 
 import gi
@@ -60,6 +61,7 @@ TERMINAL_COLORS = {
 # what Apostrophe's themes have
 CODE_SHARE = 0.12
 DIM_SHARE = 0.4
+READ = 4.5  # the contrast a text is read at: WCAG's, for text
 
 PROVIDERS: dict = {}  # display: the provider of the editor's colours
 
@@ -106,14 +108,11 @@ def is_dark(color):
     return contrast(color, "#ffffff") > contrast(color, "#000000")
 
 
-def suits_dark(color, pairs):
-    """PAIRS: colours as a light theme has them and as a dark one has.
-    Whether COLOR is told better from the dark theme's: of each kind, the
-    one it is told worst from decides."""
-    light, dark = zip(*pairs, strict=True)
-    return min(contrast(color, each) for each in dark) > min(
-        contrast(color, each) for each in light
-    )
+def ink(text, ground):
+    """What code is tinted with and markup dimmed, of the two chosen (not
+    both None): the text's colour, or, with the theme's text, what is read
+    on the chosen background."""
+    return text or ("#ffffff" if is_dark(ground) else "#000000")
 
 
 def theme(settings, style):
@@ -129,13 +128,10 @@ def editor_css(text, ground):
     theme's. Empty with none chosen."""
     if text is None and ground is None:
         return ""
-    # the ink of code and of dimmed markup: the text's colour, or, with
-    # the theme's text, what is read on the chosen background
-    ink = text or ("#ffffff" if is_dark(ground) else "#000000")
-    ink = ", ".join(str(part) for part in parts(ink))
+    shares = ", ".join(str(part) for part in parts(ink(text, ground)))
     rules = [
-        f"@define-color code_bg_color rgba({ink}, {CODE_SHARE});",
-        f"@define-color link_fg_color rgba({ink}, {DIM_SHARE});",
+        f"@define-color code_bg_color rgba({shares}, {CODE_SHARE});",
+        f"@define-color link_fg_color rgba({shares}, {DIM_SHARE});",
     ]
     if text is not None:
         rules.append(

@@ -10,6 +10,12 @@ preview paints it from its stylesheet and does not take a mark for HTML
 it has to ask about; the tags are no words to count (patches/: base.css,
 preview_converter.py, preview_security.py, stats_counter.py).
 
+With colours of the editor chosen in Preferences (colors.py), marks and
+links are those of the dark theme on a dark background, of the light one
+on a light; the text on a mark has an ink read on it, the chosen text's
+where that is; a link whose blue is not read on the background has the
+text's colour and a line under it.
+
 Marking goes by the selection; without one, by the mark the cursor is in.
 One tag cannot hold several paragraphs, nor the sign a line begins with
 (#, -, >, 1.): each line gets a mark of its own, behind its sign. Code,
@@ -35,7 +41,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
+gi.require_version("Pango", "1.0")
+from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango
 
 from . import colors, links
 
@@ -47,6 +54,9 @@ COLORS = {
     "pink": ("#ffd0e6", "#782650"),
     "orange": ("#ffd8ae", "#7a4810"),
 }
+# The text on a mark where the editor's colours are chosen: for the marks
+# of the light theme, for those of the dark one.
+INKS = ("#2e3436", "#eeeeee")
 NAMES = "|".join(COLORS)
 TAG = re.compile(rf'<mark class="({NAMES})">|</mark>')
 OPENING_END = re.compile(rf'<mark class="(?:{NAMES})">\Z')
@@ -618,12 +628,15 @@ class Marker:
         self.hide = buffer.create_tag("book-mark-tag", invisible=True, editable=False)
         self.dim = buffer.create_tag("book-mark-empty", foreground="gray")
         self.link = buffer.create_tag("book-link")
+        self.ink = buffer.create_tag("book-mark-ink")
         self.link.set_priority(0)  # under what Apostrophe greys out
+        self.ink.set_priority(0)  # and under the blue of a link
         self.tags = {name: buffer.create_tag("book-mark-" + name) for name in COLORS}
         self.shown = {
             "hide": self.hide,
             "dim": self.dim,
             "link": self.link,
+            "ink": self.ink,
             **self.tags,
         }
         self.style = style or Adw.StyleManager.get_default()
@@ -1063,24 +1076,37 @@ class Marker:
 
     def shade(self, text, ground):
         """The editor's text and its background have those colours; None:
-        the theme's. Marks are painted to be read under that text, links
-        on that background."""
+        the theme's, or a style sheet's."""
         self.text, self.ground = text, ground
         self._on_theme()
 
     def _on_theme(self, *_args):
-        dark = under = self.style.get_dark()
-        if self.text is not None:
-            under = colors.suits_dark(self.text, COLORS.values())
-        if self.ground is not None:
-            dark = colors.suits_dark(self.ground, [links.COLORS])
-        for name, tag in self.tags.items():
-            color = Gdk.RGBA()
-            color.parse(COLORS[name][1 if under else 0])
-            tag.set_property("background-rgba", color)
-        color = Gdk.RGBA()
-        color.parse(links.COLORS[1 if dark else 0])
-        self.link.set_property("foreground-rgba", color)
+        text, ground = self.text, self.ground
+        dark = self.style.get_dark() if ground is None else colors.is_dark(ground)
+        kind = 1 if dark else 0
+        grounds = [pair[kind] for pair in COLORS.values()]
+        for tag, color in zip(self.tags.values(), grounds, strict=True):
+            tag.set_property("background-rgba", colors.rgba(color))
+        blue = links.COLORS[kind]
+        if ground is None or colors.contrast(blue, ground) >= colors.READ:
+            self.link.set_property("foreground-rgba", colors.rgba(blue))
+            self.link.set_property("underline", Pango.Underline.NONE)
+        else:  # not read there: the text's colour, and a line under it
+            self.link.set_property("foreground-set", False)
+            self.link.set_property("underline", Pango.Underline.SINGLE)
+        if text is None and ground is None:  # the theme's, as they were
+            self.ink.set_property("foreground-set", False)
+            self.dim.set_property("foreground", "gray")
+            return
+        ink = text
+        if ink is None or any(
+            colors.contrast(ink, each) < colors.READ for each in grounds
+        ):
+            ink = INKS[kind]
+        self.ink.set_property("foreground-rgba", colors.rgba(ink))
+        faint = colors.rgba(colors.ink(text, ground))  # as Apostrophe's markup
+        faint.alpha = colors.DIM_SHARE
+        self.dim.set_property("foreground-rgba", faint)
 
     def _on_changed(self, *_args):
         self.stale = True
@@ -1130,6 +1156,8 @@ class Marker:
         self.links = links.found(text, literal)
         self.open = links.around(self.links, *bounds)
         wanted = plan(text, bounds, literal, self.links)
+        marked = itertools.chain.from_iterable(wanted[name] for name in COLORS)
+        wanted["ink"] = joined(sorted(marked))  # of whatever colour
         at = buffer.get_iter_at_offset
         self.painting = True
         try:

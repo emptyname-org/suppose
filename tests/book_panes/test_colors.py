@@ -127,21 +127,11 @@ class ContrastTest(unittest.TestCase):
             with self.subTest(color=color):
                 self.assertFalse(colors.is_dark(color))
 
-    def test_a_colour_goes_with_the_theme_whose_colours_it_is_told_from(self):
-        pairs = [("#fff0a0", "#6a5c00"), ("#c7e2ff", "#1f4d78")]
-        for color, dark in (
-            ("#2e3436", False),
-            ("#ffffff", True),
-            ("#808080", False),  # no guess by its lightness alone
-            ("#b0b0b0", True),
-        ):
-            with self.subTest(color=color):
-                self.assertIs(colors.suits_dark(color, pairs), dark)
-
-    def test_the_one_told_worst_decides(self):
-        # told well from one dark colour, not at all from the other
-        pairs = [("#c0c0c0", "#000000"), ("#c0c0c0", "#ffffff")]
-        self.assertFalse(colors.suits_dark("#ffffff", pairs))
+    def test_the_ink_is_the_chosen_text_or_what_is_read_on_the_background(self):
+        self.assertEqual(colors.ink("#808080", None), "#808080")
+        self.assertEqual(colors.ink("#808080", "#000000"), "#808080")
+        self.assertEqual(colors.ink(None, "#400040"), "#ffffff")
+        self.assertEqual(colors.ink(None, "#fdf6e3"), "#000000")
 
 
 class ThemeTest(unittest.TestCase):
