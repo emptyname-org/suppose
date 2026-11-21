@@ -120,10 +120,19 @@ class ShadeTest(unittest.TestCase):
             with self.subTest(color=color):
                 self.assertFalse(colors.is_dark(color))
 
-    def test_a_mix_has_a_share_of_the_other_colour(self):
-        self.assertEqual(colors.mixed("#000000", "#ffffff", 0), "#000000")
-        self.assertEqual(colors.mixed("#000000", "#ffffff", 1), "#ffffff")
-        self.assertEqual(colors.mixed("#400040", "#ffff00", 0.25), "#704030")
+    def test_an_editor_is_dark_by_its_background_or_else_by_its_text(self):
+        for text, ground, dark in (
+            (None, None, None),  # as the theme has it
+            (None, "#400040", True),
+            (None, "#f9f3e9", False),
+            ("#ffff00", "#400040", True),
+            ("#000000", "#101010", True),  # the background tells
+            ("#ffffff", "#fdf6e3", False),
+            ("#ffffff", None, True),  # light text is read on a dark one
+            ("#2e3436", None, False),
+        ):
+            with self.subTest(text=text, ground=ground):
+                self.assertIs(colors.shade(text, ground), dark)
 
 
 class ThemeTest(unittest.TestCase):
@@ -144,10 +153,10 @@ class ThemeTest(unittest.TestCase):
 
 class CssTest(unittest.TestCase):
     def test_nothing_chosen_is_no_style_sheet(self):
-        self.assertEqual(colors.editor_css(None, None, LIGHT), "")
+        self.assertEqual(colors.editor_css(None, None), "")
 
     def test_a_text_colour_is_the_editor_s_its_cursor_s_and_the_bar_s(self):
-        sheet = colors.editor_css("#112233", None, LIGHT)
+        sheet = colors.editor_css("#112233", None)
         self.assertIn(
             "textview.apostrophe-editor, .bottombar"
             " { color: #112233; caret-color: #112233; }",
@@ -156,7 +165,7 @@ class CssTest(unittest.TestCase):
         self.assertNotIn("background-color", sheet)
 
     def test_a_background_is_the_editor_s_and_the_bar_s(self):
-        sheet = colors.editor_css(None, "#400040", LIGHT)
+        sheet = colors.editor_css(None, "#400040")
         self.assertIn(
             "textview.apostrophe-editor, textview.apostrophe-editor > text,"
             " .stats-button { background-color: #400040; }",
@@ -169,22 +178,32 @@ class CssTest(unittest.TestCase):
         )
         self.assertNotIn(" color:", sheet)
 
-    def test_code_stands_out_by_a_tint_of_the_text(self):
-        tint = colors.mixed("#400040", "#ffff00", colors.CODE_SHARE)
-        self.assertIn(
-            f"@define-color code_bg_color {tint};",
-            colors.editor_css("#ffff00", "#400040", LIGHT),
-        )
-        own = colors.mixed(LIGHT[1], "#ffff00", colors.CODE_SHARE)
-        self.assertIn(  # of the theme's background, while none is chosen
-            f"@define-color code_bg_color {own};",
-            colors.editor_css("#ffff00", None, LIGHT),
-        )
-        dim = colors.mixed("#400040", LIGHT[0], colors.DIM_SHARE)
-        self.assertIn(
-            f"@define-color link_fg_color {dim};",
-            colors.editor_css(None, "#400040", LIGHT),
-        )
+    def test_code_and_dimmed_markup_are_a_share_of_white_in_a_dark_editor(self):
+        for text, ground in (("#ffff00", "#400040"), (None, "#400040")):
+            with self.subTest(text=text):
+                sheet = colors.editor_css(text, ground)
+                self.assertIn(
+                    "@define-color code_bg_color rgba(255, 255, 255, 0.12);", sheet
+                )
+                self.assertIn(
+                    "@define-color link_fg_color rgba(255, 255, 255, 0.3);", sheet
+                )
+
+    def test_and_a_share_of_black_in_a_light_one(self):
+        for text, ground in (("#073642", "#fdf6e3"), ("#ffffff", "#fdf6e3")):
+            with self.subTest(text=text):
+                sheet = colors.editor_css(text, ground)
+                self.assertIn("@define-color code_bg_color rgba(0, 0, 0, 0.12);", sheet)
+                self.assertIn("@define-color link_fg_color rgba(0, 0, 0, 0.3);", sheet)
+
+    def test_light_text_alone_is_read_on_whatever_dark_background_there_is(self):
+        # the theme's is light, a style sheet of the user's gives a dark one:
+        # code is no light patch under the light text
+        sheet = colors.editor_css("#ffffff", None)
+        self.assertIn("@define-color code_bg_color rgba(255, 255, 255, 0.12);", sheet)
+        self.assertNotIn("#", sheet.split("\n")[0])  # laid over, no colour of its own
+        dark = colors.editor_css("#2e3436", None)
+        self.assertIn("@define-color code_bg_color rgba(0, 0, 0, 0.12);", dark)
 
     def test_the_style_sheet_is_one_gtk_reads(self):
         from gi.repository import Gtk
@@ -197,7 +216,7 @@ class CssTest(unittest.TestCase):
             ("#ffff00", None),
             (None, "#ffffff"),
         ):
-            provider.load_from_string(colors.editor_css(text, ground, LIGHT))
+            provider.load_from_string(colors.editor_css(text, ground))
         self.assertEqual(errors, [])
 
 
@@ -229,24 +248,23 @@ class UseTest(Faked):
         )
 
     def test_the_editor_takes_the_chosen_colours(self):
-        dark = colors.use_in_editor(self.view, "#FFFF00", "#400040", LIGHT)
+        dark = colors.use_in_editor(self.view, "#FFFF00", "#400040")
         provider = colors.PROVIDERS["display"]
-        self.assertEqual(
-            provider.loaded, colors.editor_css("#ffff00", "#400040", LIGHT)
-        )
+        self.assertEqual(provider.loaded, colors.editor_css("#ffff00", "#400040"))
         self.assertIs(dark, True)
         # above the user's rank, and Apostrophe's tags after the sheet
         self.assertEqual(self.gtk.added, [("display", provider, 801)])
         self.assertEqual(self.updated, [provider.loaded])
 
-    def test_the_editor_tells_how_dark_its_background_is(self):
-        self.assertIs(colors.use_in_editor(self.view, "", "#f9f3e9", LIGHT), False)
-        self.assertIsNone(colors.use_in_editor(self.view, "#ffff00", "", LIGHT))
-        self.assertIsNone(colors.use_in_editor(self.view, "", "no colour", LIGHT))
+    def test_the_editor_tells_whether_it_is_a_dark_one(self):
+        self.assertIs(colors.use_in_editor(self.view, "", "#f9f3e9"), False)
+        self.assertIs(colors.use_in_editor(self.view, "#ffff00", ""), True)
+        self.assertIs(colors.use_in_editor(self.view, "#2e3436", "no colour"), False)
+        self.assertIsNone(colors.use_in_editor(self.view, "", "no colour"))
 
     def test_the_editor_gets_the_theme_back(self):
-        colors.use_in_editor(self.view, "#ffff00", "#400040", LIGHT)
-        self.assertIsNone(colors.use_in_editor(self.view, "", "", LIGHT))
+        colors.use_in_editor(self.view, "#ffff00", "#400040")
+        self.assertIsNone(colors.use_in_editor(self.view, "", ""))
         self.assertEqual(colors.PROVIDERS["display"].loaded, "")
         self.assertEqual(len(self.gtk.added), 1)  # one provider a display
         self.assertEqual(self.updated[-1], "")

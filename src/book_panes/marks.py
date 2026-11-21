@@ -627,7 +627,7 @@ class Marker:
             **self.tags,
         }
         self.style = style or Adw.StyleManager.get_default()
-        self.dark = None  # the editor's background, where it is not the theme's
+        self.dark = None  # the editor, where its colours are not the theme's
         self.handlers = [
             (self.style, self.style.connect("notify::dark", self._on_theme)),
             (buffer, buffer.connect("changed", self._on_changed)),
@@ -1062,8 +1062,8 @@ class Marker:
     # ---- painting ------------------------------------------------------------
 
     def shade(self, dark):
-        """The editor's background is a dark one, or a light one; None: as
-        the theme has it. Marks and links are painted to be read on it."""
+        """The editor is a dark one, or a light one; None: as the theme
+        has it. Marks and links are painted to be read in it."""
         self.dark = dark
         self._on_theme()
 

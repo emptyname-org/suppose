@@ -346,7 +346,7 @@ class BookPanes:
         terminal.add_controller(focus)
         self.terminal = terminal
         self.style = Adw.StyleManager.get_default()
-        self.style_handler = self.style.connect("notify::dark", self._on_theme)
+        self.style_handler = self.style.connect("notify::dark", self._color_terminal)
         self._color_terminal()
 
         title = os.environ.get("BOOK_AGENT_TITLE") or "Agent"
@@ -374,11 +374,6 @@ class BookPanes:
         header.pack_start(restart)
         return pane
 
-    def _on_theme(self, *_args):
-        self._color_terminal()
-        if self.setting_handlers:  # the editor is set up
-            self._color_editor()
-
     def _color_terminal(self, *_args):
         """The terminal has the colours chosen, or those of the app's
         light or dark theme."""
@@ -392,7 +387,7 @@ class BookPanes:
 
     def _color_editor(self, *_args):
         """The editor has the colours chosen, or those of Apostrophe's
-        theme; the marks go with its background."""
+        theme; the marks go with them."""
         window = self.window
         settings = window.settings
         self.marker.shade(
@@ -400,7 +395,6 @@ class BookPanes:
                 window.textview,
                 settings.get_string(colors.EDITOR_TEXT_KEY),
                 settings.get_string(colors.EDITOR_GROUND_KEY),
-                colors.EDITOR_COLORS[colors.theme(settings, self.style)],
             )
         )
 
@@ -574,7 +568,6 @@ class BookPanes:
                 (fonts.TERMINAL_KEY, self._show_terminal_font),
                 (colors.EDITOR_TEXT_KEY, self._color_editor),
                 (colors.EDITOR_GROUND_KEY, self._color_editor),
-                (colors.THEME_KEY, self._color_editor),
                 (colors.TERMINAL_TEXT_KEY, self._color_terminal),
                 (colors.TERMINAL_GROUND_KEY, self._color_terminal),
             )

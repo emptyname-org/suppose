@@ -950,7 +950,7 @@ def scenario(app):
         return (
             told(view.get_color()),
             ground(view),
-            told(view.markup.tag_code_text.get_property("background-rgba")),
+            view.markup.tag_code_text.get_property("background-rgba").to_string(),
             told(marker.tags["yellow"].get_property("background-rgba")),
             told(marker.link.get_property("foreground-rgba")),
         )
@@ -994,7 +994,7 @@ def scenario(app):
     chosen = (
         "#ffff00",
         "#400040",
-        colors.mixed("#400040", "#ffff00", colors.CODE_SHARE),
+        "rgba(255,255,255,0.12)",  # laid over the background
         marks.COLORS["yellow"][1],
         links.COLORS[1],
     )
